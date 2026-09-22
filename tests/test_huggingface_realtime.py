@@ -173,6 +173,25 @@ def _messages(items: list[Any]) -> list[dict[str, Any]]:
 
 
 @pytest.mark.asyncio
+async def test_receive_preserves_audio_until_connection_is_ready() -> None:
+    """Microphone audio received during startup should wait for the realtime connection."""
+    handler = _plain_handler()
+    frame = np.arange(8, dtype=np.int16)
+
+    receive_task = asyncio.create_task(handler.receive((16000, frame)))
+    await asyncio.sleep(0)
+
+    assert not receive_task.done()
+
+    append = AsyncMock()
+    handler.connection = SimpleNamespace(input_audio_buffer=SimpleNamespace(append=append))
+    handler._connected_event.set()
+    await receive_task
+
+    append.assert_awaited_once_with(audio=base64.b64encode(frame.tobytes()).decode("utf-8"))
+
+
+@pytest.mark.asyncio
 async def test_partial_transcription_uses_latest_snapshot(monkeypatch: Any) -> None:
     """Partial transcription snapshots should replace older snapshots for the same item."""
     monkeypatch.setattr(hf_mod, "get_session_instructions", lambda _instance_path=None: "test")
@@ -829,14 +848,6 @@ async def test_send_idle_signal_dispatches_idle_tool(monkeypatch: Any) -> None:
     await handler.send_idle_signal(200.0)
 
     start_idle.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_receive_without_connection_is_dropped() -> None:
-    """A frame received before the connection opens is dropped."""
-    handler = _plain_handler()
-    handler.connection = None
-    await handler.receive((16000, np.zeros(4, dtype=np.int16)))  # must not raise
 
 
 @pytest.mark.asyncio
