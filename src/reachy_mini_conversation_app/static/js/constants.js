@@ -15,6 +15,10 @@ export const AVATAR_BY_PROFILE = Object.freeze({
   time_traveler: "time-traveler.svg",
   victorian_butler: "victorian-butler.svg",
 });
+export const BACKENDS = Object.freeze({
+  HUGGINGFACE: "huggingface",
+  OPENAI: "openai",
+});
 
 export const ORB_STATES = Object.freeze({
   MUTED: "muted",

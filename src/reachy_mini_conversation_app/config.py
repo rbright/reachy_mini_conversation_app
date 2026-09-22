@@ -59,8 +59,35 @@ HF_AVAILABLE_VOICES: list[str] = [
     "Uncle_Fu",
     "Vivian",
 ]
+OPENAI_AVAILABLE_VOICES: list[str] = [
+    "alloy",
+    "ash",
+    "ballad",
+    "coral",
+    "echo",
+    "sage",
+    "shimmer",
+    "verse",
+    "marin",
+    "cedar",
+]
 
 HF_BACKEND = "huggingface"
+OPENAI_BACKEND = "openai"
+DEFAULT_BACKEND_PROVIDER = HF_BACKEND
+SUPPORTED_BACKEND_PROVIDERS = (HF_BACKEND, OPENAI_BACKEND)
+BACKEND_PROVIDER_ENV = "BACKEND_PROVIDER"
+OPENAI_API_KEY_ENV = "OPENAI_API_KEY"
+OPENAI_REALTIME_MODEL_ENV = "OPENAI_REALTIME_MODEL"
+OPENAI_REALTIME_MODELS = (
+    "gpt-realtime-2.1",
+    "gpt-realtime-2",
+    "gpt-realtime-1.5",
+    "gpt-realtime",
+    "gpt-realtime-mini",
+)
+OPENAI_DEFAULT_MODEL = OPENAI_REALTIME_MODELS[0]
+OPENAI_DEFAULT_VOICE = "marin"
 HF_REALTIME_CONNECTION_MODE_ENV = "HF_REALTIME_CONNECTION_MODE"
 HF_REALTIME_WS_URL_ENV = "HF_REALTIME_WS_URL"
 REALTIME_TRANSCRIPTION_LANGUAGE_ENV = "REALTIME_TRANSCRIPTION_LANGUAGE"
@@ -87,18 +114,41 @@ HF_DEFAULTS = HFBackendDefaults()
 
 logger = logging.getLogger(__name__)
 
-# Removed backend selectors kept in stale robot .env files: warn but ignore them.
-_OBSOLETE_BACKEND_ENV_NAMES = ("BACKEND_PROVIDER", "MODEL_NAME")
+
+def _normalize_backend_provider(value: str | None) -> str:
+    """Return a supported backend provider, falling back to Hugging Face."""
+    candidate = (value or "").strip().lower()
+    if not candidate:
+        return DEFAULT_BACKEND_PROVIDER
+    if candidate in SUPPORTED_BACKEND_PROVIDERS:
+        return candidate
+
+    logger.warning(
+        "Invalid %s=%r. Expected one of %s; using %s.",
+        BACKEND_PROVIDER_ENV,
+        value,
+        ", ".join(SUPPORTED_BACKEND_PROVIDERS),
+        DEFAULT_BACKEND_PROVIDER,
+    )
+    return DEFAULT_BACKEND_PROVIDER
 
 
-def _warn_on_obsolete_backend_env() -> None:
-    """Warn when removed multi-backend selectors are still set; Hugging Face is the only backend."""
-    present = [name for name in _OBSOLETE_BACKEND_ENV_NAMES if (os.getenv(name) or "").strip()]
-    if present:
-        logger.warning(
-            "Ignoring obsolete backend environment variable(s): %s. This app now uses the Hugging Face backend only.",
-            ", ".join(present),
-        )
+def _normalize_openai_realtime_model(value: str | None) -> str:
+    """Return a supported direct OpenAI Realtime model."""
+    candidate = (value or "").strip()
+    if not candidate:
+        return OPENAI_DEFAULT_MODEL
+    if candidate in OPENAI_REALTIME_MODELS:
+        return candidate
+
+    logger.warning(
+        "Invalid %s=%r. Expected one of %s; using %s.",
+        OPENAI_REALTIME_MODEL_ENV,
+        value,
+        ", ".join(OPENAI_REALTIME_MODELS),
+        OPENAI_DEFAULT_MODEL,
+    )
+    return OPENAI_DEFAULT_MODEL
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -304,12 +354,13 @@ else:
     else:
         logger.warning("No .env file found, using environment variables")
 
-_warn_on_obsolete_backend_env()
-
 
 class Config:
     """Configuration class for the conversation app."""
 
+    BACKEND_PROVIDER = _normalize_backend_provider(os.getenv(BACKEND_PROVIDER_ENV))
+    OPENAI_API_KEY = os.getenv(OPENAI_API_KEY_ENV)
+    OPENAI_REALTIME_MODEL = _normalize_openai_realtime_model(os.getenv(OPENAI_REALTIME_MODEL_ENV))
     HF_REALTIME_CONNECTION_MODE = (
         _normalize_hf_connection_mode(os.getenv(HF_REALTIME_CONNECTION_MODE_ENV)) or HF_DEFAULTS.connection_mode
     )
@@ -320,7 +371,9 @@ class Config:
     HF_TOKEN = os.getenv("HF_TOKEN")  # Optional, falls back to hf auth login if not set
 
     logger.debug(
-        "HF mode: %s, HF session URL set: %s, HF direct URL set: %s",
+        "Backend provider: %s, OpenAI model: %s, HF mode: %s, HF session URL set: %s, HF direct URL set: %s",
+        BACKEND_PROVIDER,
+        OPENAI_REALTIME_MODEL,
         HF_REALTIME_CONNECTION_MODE,
         bool(HF_REALTIME_SESSION_URL and HF_REALTIME_SESSION_URL.strip()),
         bool(HF_REALTIME_WS_URL and HF_REALTIME_WS_URL.strip()),
@@ -419,7 +472,9 @@ config = Config()
 
 def refresh_runtime_config_from_env() -> None:
     """Refresh mutable runtime config fields from the current environment."""
-    _warn_on_obsolete_backend_env()
+    config.BACKEND_PROVIDER = _normalize_backend_provider(os.getenv(BACKEND_PROVIDER_ENV))
+    config.OPENAI_API_KEY = os.getenv(OPENAI_API_KEY_ENV)
+    config.OPENAI_REALTIME_MODEL = _normalize_openai_realtime_model(os.getenv(OPENAI_REALTIME_MODEL_ENV))
     config.HF_REALTIME_CONNECTION_MODE = (
         _normalize_hf_connection_mode(os.getenv(HF_REALTIME_CONNECTION_MODE_ENV)) or HF_DEFAULTS.connection_mode
     )
@@ -433,14 +488,33 @@ def refresh_runtime_config_from_env() -> None:
     config.REACHY_MINI_CUSTOM_PROFILE = LOCKED_PROFILE or os.getenv("REACHY_MINI_CUSTOM_PROFILE")
 
 
-def get_available_voices() -> list[str]:
-    """Return the curated Hugging Face voice list."""
+def get_backend_choice() -> str:
+    """Return the configured realtime backend provider."""
+    return _normalize_backend_provider(config.BACKEND_PROVIDER)
+
+
+def get_available_voices(backend: str | None = None) -> list[str]:
+    """Return the curated voice list for a realtime provider."""
+    selected = get_backend_choice() if backend is None else _normalize_backend_provider(backend)
+    if selected == OPENAI_BACKEND:
+        return list(OPENAI_AVAILABLE_VOICES)
     return list(HF_AVAILABLE_VOICES)
 
 
-def get_default_voice() -> str:
-    """Return the default Hugging Face voice."""
-    return HF_DEFAULTS.voice
+def get_default_voice(backend: str | None = None) -> str:
+    """Return the default voice for a realtime provider."""
+    selected = get_backend_choice() if backend is None else _normalize_backend_provider(backend)
+    return OPENAI_DEFAULT_VOICE if selected == OPENAI_BACKEND else HF_DEFAULTS.voice
+
+
+def get_openai_realtime_model() -> str:
+    """Return the validated direct OpenAI Realtime model."""
+    return _normalize_openai_realtime_model(config.OPENAI_REALTIME_MODEL)
+
+
+def has_openai_api_key() -> bool:
+    """Return whether a direct OpenAI credential is configured."""
+    return bool((config.OPENAI_API_KEY or "").strip())
 
 
 def get_hf_session_url() -> str | None:

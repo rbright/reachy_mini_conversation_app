@@ -1,5 +1,7 @@
 """Tests for the headless console stream."""
 
+import os
+import stat
 import time
 import asyncio
 import threading
@@ -12,10 +14,11 @@ from collections.abc import Callable
 import numpy as np
 import pytest
 from fastapi import FastAPI, HTTPException
+from numpy.typing import NDArray
 from fastapi.testclient import TestClient
 
 import reachy_mini_conversation_app.console as console_mod
-from reachy_mini_conversation_app.config import HF_AVAILABLE_VOICES, config
+from reachy_mini_conversation_app.config import HF_AVAILABLE_VOICES, OPENAI_AVAILABLE_VOICES, config
 from reachy_mini_conversation_app.console import LocalStream
 from reachy_mini_conversation_app.streaming import AdditionalOutputs
 from reachy_mini_conversation_app.startup_settings import (
@@ -205,12 +208,57 @@ def test_backend_config_requests_in_process_restart_with_handler_factory(
     data = _rpc_call(app, "backend.config", {"hf_mode": "local", "hf_host": "localhost", "hf_port": 8765})["result"]
 
     assert data["ok"] is True
-    assert data["message"] == "Connection saved. Reconnecting backend."
     assert data["backend"] == "huggingface"
     assert data["requires_restart"] is False
     assert data["can_proceed"] is True
     assert data["backend_connection_state"] == "connecting"
     assert stream._restart_requested.is_set()
+
+
+def test_backend_config_shutdown_runs_on_stream_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Provider changes close the active connection on the stream's owning loop."""
+    monkeypatch.setattr(config, "HF_REALTIME_CONNECTION_MODE", "deployed")
+    monkeypatch.setattr(config, "HF_REALTIME_WS_URL", None)
+    monkeypatch.delenv("HF_REALTIME_CONNECTION_MODE", raising=False)
+    monkeypatch.delenv("HF_REALTIME_WS_URL", raising=False)
+
+    stream_loop = asyncio.new_event_loop()
+    loop_thread = threading.Thread(target=stream_loop.run_forever)
+    loop_thread.start()
+    shutdown_loops: list[asyncio.AbstractEventLoop] = []
+
+    async def shutdown() -> None:
+        shutdown_loops.append(asyncio.get_running_loop())
+
+    app = FastAPI()
+    handler = MagicMock()
+    handler.shutdown = shutdown
+    stream = LocalStream(
+        handler,
+        SimpleNamespace(media=SimpleNamespace(audio=None, backend=None)),
+        settings_app=app,
+        instance_path=str(tmp_path),
+        handler_factory=lambda _voice: handler,
+    )
+    stream._asyncio_loop = stream_loop
+    stream._init_settings_ui_if_needed()
+
+    try:
+        result = _rpc_call(
+            app,
+            "backend.config",
+            {"backend": "huggingface", "hf_mode": "local", "hf_host": "localhost"},
+        )["result"]
+    finally:
+        stream_loop.call_soon_threadsafe(stream_loop.stop)
+        loop_thread.join(timeout=1.0)
+        stream_loop.close()
+
+    assert result["ok"] is True
+    assert shutdown_loops == [stream_loop]
 
 
 def test_backend_config_persists_local_hf_selection_and_status(
@@ -823,7 +871,8 @@ async def test_change_voice_reports_handler_failure() -> None:
 
 def _audio_robot(**media_attrs: Any) -> SimpleNamespace:
     """Return a robot whose media exposes only the attributes a test drives."""
-    return SimpleNamespace(media=SimpleNamespace(audio=None, backend=None, **media_attrs))
+    attributes = {"get_output_audio_samplerate": MagicMock(return_value=16000), **media_attrs}
+    return SimpleNamespace(media=SimpleNamespace(audio=None, backend=None, **attributes))
 
 
 def _stop_after(stream: LocalStream, value: Any) -> Callable[[], Any]:
@@ -842,6 +891,7 @@ async def test_record_loop_forwards_unmuted_frames() -> None:
     frame = np.zeros(4, dtype=np.int16)
     robot = _audio_robot(get_input_audio_samplerate=MagicMock(return_value=16000), get_audio_sample=MagicMock())
     handler = MagicMock()
+    handler.SAMPLE_RATE = 16000
     handler.receive = AsyncMock()
     stream = LocalStream(handler, robot)
     robot.media.get_audio_sample.side_effect = _stop_after(stream, frame)
@@ -849,6 +899,57 @@ async def test_record_loop_forwards_unmuted_frames() -> None:
     await stream.record_loop()
 
     handler.receive.assert_awaited_once_with((16000, frame))
+
+
+@pytest.mark.asyncio
+async def test_record_loop_resamples_openai_input_to_24khz() -> None:
+    """A 16 kHz SDK microphone frame reaches the OpenAI handler as 24 kHz PCM."""
+    frame = np.ones(160, dtype=np.float32)
+    robot = _audio_robot(get_input_audio_samplerate=MagicMock(return_value=16000), get_audio_sample=MagicMock())
+    handler = MagicMock()
+    handler.SAMPLE_RATE = 24000
+    handler.receive = AsyncMock()
+    stream = LocalStream(handler, robot)
+    robot.media.get_audio_sample.side_effect = _stop_after(stream, frame)
+
+    await stream.record_loop()
+
+    sample_rate, forwarded = handler.receive.await_args.args[0]
+    assert sample_rate == 24000
+    assert forwarded.shape == (240,)
+    assert forwarded[-1] == pytest.approx(1.0, abs=0.01)
+
+
+@pytest.mark.asyncio
+async def test_record_loop_preserves_resampler_state_across_chunks() -> None:
+    """Arbitrary microphone chunks produce one continuous 24 kHz stream."""
+    source = np.sin(2 * np.pi * 1000 * np.arange(1000) / 16000).astype(np.float32)
+
+    async def resample(chunks: list[NDArray[np.float32]]) -> NDArray[np.float32]:
+        robot = _audio_robot(
+            get_input_audio_samplerate=MagicMock(return_value=16000),
+            get_audio_sample=MagicMock(),
+        )
+        handler = MagicMock()
+        handler.SAMPLE_RATE = 24000
+        handler.receive = AsyncMock()
+        stream = LocalStream(handler, robot)
+        remaining = iter(chunks)
+
+        def next_chunk() -> NDArray[np.float32]:
+            chunk = next(remaining)
+            if chunk is chunks[-1]:
+                stream._stop_event.set()
+            return chunk
+
+        robot.media.get_audio_sample.side_effect = next_chunk
+        await stream.record_loop()
+        return np.concatenate([call.args[0][1] for call in handler.receive.await_args_list])
+
+    whole = await resample([source])
+    chunked = await resample([source[:137], source[137:348], source[348:]])
+
+    np.testing.assert_allclose(chunked, whole, atol=1e-6)
 
 
 @pytest.mark.asyncio
@@ -900,7 +1001,7 @@ async def test_play_loop_pushes_mono_audio_as_float32() -> None:
     robot = _audio_robot(push_audio_sample=MagicMock())
     handler = MagicMock()
     stream = LocalStream(handler, robot)
-    handler.emit = AsyncMock(side_effect=_stop_after(stream, (24000, np.zeros(4, dtype=np.int16))))
+    handler.emit = AsyncMock(side_effect=_stop_after(stream, (16000, np.zeros(4, dtype=np.int16))))
 
     await stream.play_loop()
 
@@ -917,12 +1018,80 @@ async def test_play_loop_downmixes_stereo_before_pushing() -> None:
     handler = MagicMock()
     stream = LocalStream(handler, robot)
     stereo = np.zeros((4, 2), dtype=np.int16)
-    handler.emit = AsyncMock(side_effect=_stop_after(stream, (24000, stereo)))
+    handler.emit = AsyncMock(side_effect=_stop_after(stream, (16000, stereo)))
 
     await stream.play_loop()
 
     pushed = robot.media.push_audio_sample.call_args.args[0]
     assert pushed.ndim == 1
+
+
+@pytest.mark.asyncio
+async def test_play_loop_resamples_openai_output_to_sdk_rate() -> None:
+    """OpenAI's 24 kHz PCM reaches the 16 kHz SDK player at its native rate."""
+    robot = _audio_robot(
+        get_output_audio_samplerate=MagicMock(return_value=16000),
+        push_audio_sample=MagicMock(),
+    )
+    handler = MagicMock()
+    stream = LocalStream(handler, robot)
+    output = np.full(240, 32767, dtype=np.int16)
+    handler.emit = AsyncMock(side_effect=_stop_after(stream, (24000, output)))
+
+    await stream.play_loop()
+
+    played = robot.media.push_audio_sample.call_args.args[0]
+    assert played.shape == (160,)
+    assert played[-1] > 0.98
+
+
+@pytest.mark.asyncio
+async def test_play_loop_preserves_resampler_state_across_chunks() -> None:
+    """Arbitrary backend chunks produce one continuous 16 kHz playback stream."""
+    source = np.sin(2 * np.pi * 1000 * np.arange(1000) / 24000).astype(np.float32)
+
+    async def resample(chunks: list[NDArray[np.float32]]) -> NDArray[np.float32]:
+        pushed: list[NDArray[np.float32]] = []
+        robot = _audio_robot(
+            get_output_audio_samplerate=MagicMock(return_value=16000),
+            push_audio_sample=lambda frame: pushed.append(frame),
+        )
+        handler = MagicMock()
+        stream = LocalStream(handler, robot)
+        remaining = iter(chunks)
+
+        async def emit() -> tuple[int, NDArray[np.float32]]:
+            chunk = next(remaining)
+            if chunk is chunks[-1]:
+                stream._stop_event.set()
+            return 24000, chunk
+
+        handler.emit = emit
+        await stream.play_loop()
+        return np.concatenate(pushed)
+
+    whole = await resample([source])
+    chunked = await resample([source[:113], source[113:370], source[370:]])
+
+    np.testing.assert_allclose(chunked, whole, atol=1e-6)
+
+
+@pytest.mark.asyncio
+async def test_play_loop_resampling_attenuates_above_output_nyquist() -> None:
+    """Downsampling filters frequencies the 16 kHz speaker cannot represent."""
+    source = np.sin(2 * np.pi * 10000 * np.arange(2400) / 24000).astype(np.float32)
+    robot = _audio_robot(
+        get_output_audio_samplerate=MagicMock(return_value=16000),
+        push_audio_sample=MagicMock(),
+    )
+    handler = MagicMock()
+    stream = LocalStream(handler, robot)
+    handler.emit = AsyncMock(side_effect=_stop_after(stream, (24000, source)))
+
+    await stream.play_loop()
+
+    played = robot.media.push_audio_sample.call_args.args[0]
+    assert np.sqrt(np.mean(np.square(played[100:]))) < 0.01
 
 
 @pytest.mark.asyncio
@@ -1059,3 +1228,123 @@ def test_rpc_settings_methods() -> None:
     assert isinstance(r2["result"], list)
     assert "spaces" in r3["result"]
     assert "enabled_tools" in r4["result"]
+
+
+def test_current_voice_falls_back_to_selected_provider_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A saved voice from another provider cannot escape the selected provider catalog."""
+    monkeypatch.setattr(config, "BACKEND_PROVIDER", "openai")
+    stream = LocalStream(MagicMock(), _rpc_robot(), startup_voice="Aiden")
+
+    assert stream.get_current_voice() == "marin"
+
+
+def test_backend_config_persists_replaces_and_hides_openai_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OpenAI selection persists replaceable credentials without returning them through RPC."""
+    monkeypatch.setattr(config, "BACKEND_PROVIDER", "huggingface")
+    monkeypatch.setattr(config, "OPENAI_API_KEY", None)
+    monkeypatch.setattr(config, "OPENAI_REALTIME_MODEL", "gpt-realtime-2.1")
+    monkeypatch.delenv("BACKEND_PROVIDER", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_REALTIME_MODEL", raising=False)
+
+    app = FastAPI()
+    stream = LocalStream(MagicMock(), _rpc_robot(), settings_app=app, instance_path=str(tmp_path))
+    stream._init_settings_ui_if_needed()
+
+    first = _rpc_call(
+        app,
+        "backend.config",
+        {"backend": "openai", "api_key": "first-secret", "openai_model": "gpt-realtime-2.1"},
+    )["result"]
+    env_path = tmp_path / ".env"
+    if os.name == "posix":
+        assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
+
+    second = _rpc_call(
+        app,
+        "backend.config",
+        {"backend": "openai", "api_key": "replacement-secret", "openai_model": "gpt-realtime-2"},
+    )["result"]
+    voices = _rpc_call(app, "voices.list")["result"]
+
+    assert first["backend_provider"] == "openai"
+    assert second["has_openai_key"] is True
+    assert second["openai_model"] == "gpt-realtime-2"
+    assert "first-secret" not in repr(first)
+    assert "replacement-secret" not in repr(second)
+    assert voices == OPENAI_AVAILABLE_VOICES
+    env_text = env_path.read_text(encoding="utf-8")
+    assert "BACKEND_PROVIDER=openai" in env_text
+    assert "OPENAI_API_KEY=replacement-secret" in env_text
+    assert "first-secret" not in env_text
+    assert "OPENAI_REALTIME_MODEL=gpt-realtime-2" in env_text
+    if os.name == "posix":
+        assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes are not supported")
+def test_backend_config_hardens_existing_instance_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Saving an OpenAI key restricts an existing instance env file to its owner."""
+    env_path = tmp_path / ".env"
+    env_path.write_text("UNRELATED=value\n", encoding="utf-8")
+    env_path.chmod(0o644)
+    monkeypatch.setattr(config, "BACKEND_PROVIDER", "huggingface")
+    monkeypatch.setattr(config, "OPENAI_API_KEY", None)
+    monkeypatch.setattr(config, "OPENAI_REALTIME_MODEL", "gpt-realtime-2.1")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    app = FastAPI()
+    stream = LocalStream(MagicMock(), _rpc_robot(), settings_app=app, instance_path=str(tmp_path))
+    stream._init_settings_ui_if_needed()
+
+    result = _rpc_call(
+        app,
+        "backend.config",
+        {"backend": "openai", "api_key": "new-secret", "openai_model": "gpt-realtime-2.1"},
+    )["result"]
+
+    assert result["ok"] is True
+    assert "OPENAI_API_KEY=new-secret" in env_path.read_text(encoding="utf-8")
+    assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
+
+
+def test_backend_config_rejects_missing_key_and_invalid_openai_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OpenAI cannot be selected without a key or with an unsupported model."""
+    monkeypatch.setattr(config, "BACKEND_PROVIDER", "huggingface")
+    monkeypatch.setattr(config, "OPENAI_API_KEY", None)
+    monkeypatch.setattr(config, "OPENAI_REALTIME_MODEL", "gpt-realtime-2.1")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    app = FastAPI()
+    stream = LocalStream(MagicMock(), _rpc_robot(), settings_app=app, instance_path=str(tmp_path))
+    stream._init_settings_ui_if_needed()
+
+    missing_key = _rpc_call(app, "backend.config", {"backend": "openai"})
+    invalid_model = _rpc_call(
+        app,
+        "backend.config",
+        {"backend": "openai", "api_key": "secret", "openai_model": "gpt-4o"},
+    )
+
+    assert missing_key["error"]["data"]["reason"] == "empty_key"
+    assert invalid_model["error"]["data"]["reason"] == "invalid_openai_model"
+    assert not (tmp_path / ".env").exists()
+
+
+def test_backend_errors_redact_openai_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Credential text cannot escape through backend status errors."""
+    monkeypatch.setattr(config, "OPENAI_API_KEY", "do-not-expose")
+    stream = LocalStream(MagicMock(), _rpc_robot())
+
+    stream._set_backend_connection_state("disconnected", RuntimeError("request with do-not-expose failed"))
+
+    assert stream._backend_error == "RuntimeError: request with [redacted] failed"

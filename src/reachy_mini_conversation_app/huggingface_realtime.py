@@ -5,7 +5,8 @@ import base64
 import random
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Any, Final, Tuple, Optional
+from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING, Any, Final, Tuple, ClassVar, Optional
 
 import httpx
 import numpy as np
@@ -24,10 +25,12 @@ from openai.types.realtime import (
     RealtimeSessionCreateRequestParam,
 )
 from websockets.exceptions import ConnectionClosedError
+from openai.types.realtime.realtime_audio_formats_param import AudioPCM
 from openai.types.realtime.realtime_audio_input_turn_detection_param import ServerVad
 
 from reachy_mini_conversation_app.tools import core_tools
 from reachy_mini_conversation_app.config import (
+    HF_BACKEND,
     HF_LOCAL_CONNECTION_MODE,
     config,
     get_default_voice,
@@ -42,7 +45,7 @@ from reachy_mini_conversation_app.prompts import (
     get_session_instructions,
     get_session_greeting_prompt,
 )
-from reachy_mini_conversation_app.streaming import AdditionalOutputs, audio_to_int16
+from reachy_mini_conversation_app.streaming import AudioArray, AdditionalOutputs, audio_to_int16
 from reachy_mini_conversation_app.tools.core_tools import (
     ToolSpec,
     ToolDependencies,
@@ -114,10 +117,13 @@ def _build_openai_compatible_client_from_realtime_url(
     return client, parsed.connect_query
 
 
-class HuggingFaceRealtimeHandler(ConversationHandler):
-    """Realtime stream handler for the Hugging Face OpenAI-compatible endpoint."""
+class OpenAICompatibleRealtimeHandler(ConversationHandler, ABC):
+    """Shared realtime conversation loop for OpenAI-compatible providers."""
 
-    SAMPLE_RATE = 16000
+    BACKEND_PROVIDER: ClassVar[str]
+    SAMPLE_RATE: ClassVar[int]
+    VOICE_UPDATE_REQUIRES_RECONNECT: ClassVar[bool] = False
+    REFRESH_CLIENT_ON_RECONNECT: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -200,7 +206,7 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
         fallback: str | None = None,
     ) -> str | None:
         """Return a backend-supported voice, optionally falling back when unsupported."""
-        available_voices = get_available_voices()
+        available_voices = get_available_voices(self.BACKEND_PROVIDER)
         voice_value = (voice or "").strip()
         if not voice_value:
             return fallback
@@ -212,23 +218,31 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
 
         if voice:
             logger.warning(
-                "Ignoring unsupported %s %r; expected one of %s",
+                "Ignoring unsupported %s %r for backend=%r; expected one of %s",
                 source,
                 voice,
+                self.BACKEND_PROVIDER,
                 available_voices,
             )
         return fallback
 
+    @abstractmethod
+    def _audio_format(self) -> AudioPCM | HFNativeRateAudioPCM:
+        """Return the provider's PCM audio format."""
+
+    def _get_model_name(self) -> str | None:
+        """Return the provider model passed to the Realtime connection."""
+        return None
+
     def _get_session_config(self, tool_specs: list[ToolSpec]) -> RealtimeSessionCreateRequestParam:
-        """Return the Hugging Face OpenAI-compatible session config."""
-        return RealtimeSessionCreateRequestParam(
+        """Return the OpenAI-compatible realtime session config."""
+        audio_format = self._audio_format()
+        session = RealtimeSessionCreateRequestParam(
             type="realtime",
             instructions=get_session_instructions(self.instance_path),
             audio=RealtimeAudioConfigParam(
                 input=RealtimeAudioConfigInputParam(
-                    # The OpenAI SDK type only includes 24 kHz PCM, but the HF
-                    # compatible server uses rate=None for native 16 kHz mode.
-                    format=_native_rate_audio_pcm(),  # type: ignore[typeddict-item]
+                    format=audio_format,  # type: ignore[typeddict-item]
                     transcription=AudioTranscriptionParam(
                         model="gpt-4o-transcribe",
                         language=config.REALTIME_TRANSCRIPTION_LANGUAGE,
@@ -236,13 +250,17 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
                     turn_detection=ServerVad(type="server_vad", interrupt_response=True),
                 ),
                 output=RealtimeAudioConfigOutputParam(
-                    format=_native_rate_audio_pcm(),  # type: ignore[typeddict-item]
+                    format=audio_format,  # type: ignore[typeddict-item]
                     voice=self.get_current_voice(),
                 ),
             ),
             tools=to_realtime_tools_config(tool_specs),
             tool_choice="auto",
         )
+        model_name = self._get_model_name()
+        if model_name is not None:
+            session["model"] = model_name
+        return session
 
     def _is_connected(self) -> bool:
         """Return whether the realtime connection is open."""
@@ -262,13 +280,16 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
 
     async def change_voice(self, voice: str) -> str:
         """Change only the voice, updating the active session when possible."""
-        default_voice = get_default_voice()
+        default_voice = get_default_voice(self.BACKEND_PROVIDER)
         resolved_voice = (
             self._resolve_backend_voice(voice, source="requested voice", fallback=default_voice) or default_voice
         )
         self._voice_override = resolved_voice
         if self.connection is not None:
             try:
+                if self.VOICE_UPDATE_REQUIRES_RECONNECT:
+                    await self.connection.close()
+                    return f"Voice changed to {resolved_voice}. Reconnecting."
                 await self.connection.session.update(
                     session=RealtimeSessionCreateRequestParam(
                         type="realtime",
@@ -287,7 +308,7 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
 
     def get_current_voice(self) -> str:
         """Return the voice currently selected for this handler."""
-        default_voice = get_default_voice()
+        default_voice = get_default_voice(self.BACKEND_PROVIDER)
         voice = self._voice_override or get_session_voice(default=default_voice)
         return self._resolve_backend_voice(voice, source="session voice", fallback=default_voice) or default_voice
 
@@ -305,21 +326,22 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
             return f"Failed to apply personality: {exc}"
 
         if self.connection is not None:
-            try:
-                await self.connection.session.update(
-                    session=RealtimeSessionCreateRequestParam(
-                        type="realtime",
-                        instructions=instructions,
-                        audio=RealtimeAudioConfigParam(
-                            output=RealtimeAudioConfigOutputParam(
-                                voice=voice,
+            if not self.VOICE_UPDATE_REQUIRES_RECONNECT:
+                try:
+                    await self.connection.session.update(
+                        session=RealtimeSessionCreateRequestParam(
+                            type="realtime",
+                            instructions=instructions,
+                            audio=RealtimeAudioConfigParam(
+                                output=RealtimeAudioConfigOutputParam(
+                                    voice=voice,
+                                ),
                             ),
                         ),
-                    ),
-                )
-                logger.info("Applied personality via live update: %s", profile or "default")
-            except Exception as exc:
-                logger.warning("Live update failed; will restart session: %s", exc)
+                    )
+                    logger.info("Applied personality via live update: %s", profile or "default")
+                except Exception as exc:
+                    logger.warning("Live update failed; will restart session: %s", exc)
 
             try:
                 await self._restart_session()
@@ -353,9 +375,12 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
         item_id: str,
         delta: str,
     ) -> None:
-        """Record a Hugging Face partial transcript snapshot."""
-        input_transcript.item_id = item_id
-        input_transcript.deltas = [delta]
+        """Record a suffix delta for a partial transcript."""
+        if input_transcript.item_id != item_id:
+            input_transcript.item_id = item_id
+            input_transcript.deltas = [delta]
+        else:
+            input_transcript.deltas.append(delta)
 
     async def start_up(self) -> None:
         """Start the handler with minimal retries on unexpected websocket closure."""
@@ -371,7 +396,8 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
                 # Abrupt close (e.g., "no close frame received or sent") → retry
                 logger.warning("Realtime websocket closed unexpectedly (attempt %d/%d): %s", attempt, max_attempts, e)
                 if attempt < max_attempts:
-                    self.client = await self._build_realtime_client()
+                    if self.REFRESH_CLIENT_ON_RECONNECT:
+                        self.client = await self._build_realtime_client()
                     # exponential backoff with jitter
                     base_delay = 2 ** (attempt - 1)  # 1s, 2s, 4s, 8s, etc.
                     jitter = random.uniform(0, 0.5)
@@ -703,6 +729,9 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
             [tool["name"] for tool in tool_specs],
         )
         connect_kwargs: dict[str, Any] = {}
+        model_name = self._get_model_name()
+        if model_name is not None:
+            connect_kwargs["model"] = model_name
         if self._realtime_connect_query:
             connect_kwargs["extra_query"] = self._realtime_connect_query
         async with self.client.realtime.connect(**connect_kwargs) as conn:
@@ -944,7 +973,7 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
                 await self.tool_manager.shutdown()
 
     # Microphone receive
-    async def receive(self, frame: Tuple[int, NDArray[np.int16]]) -> None:
+    async def receive(self, frame: Tuple[int, AudioArray]) -> None:
         """Receive audio frame from the microphone and send it to the realtime server.
 
         Handles both mono and stereo audio formats, converting to the expected
@@ -1009,8 +1038,34 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
                 break
 
     async def get_available_voices(self) -> list[str]:
-        """Return the available Hugging Face voices."""
-        return get_available_voices()
+        """Return the available voices for this provider."""
+        return get_available_voices(self.BACKEND_PROVIDER)
+
+    @abstractmethod
+    async def _build_realtime_client(self) -> AsyncOpenAI:
+        """Build the provider's OpenAI-compatible realtime client."""
+
+
+class HuggingFaceRealtimeHandler(OpenAICompatibleRealtimeHandler):
+    """Realtime handler for Hugging Face OpenAI-compatible endpoints."""
+
+    BACKEND_PROVIDER = HF_BACKEND
+    SAMPLE_RATE = 16000
+    REFRESH_CLIENT_ON_RECONNECT = True
+
+    def _audio_format(self) -> HFNativeRateAudioPCM:
+        """Return the Hugging Face native-rate PCM config."""
+        return _native_rate_audio_pcm()
+
+    def _record_partial_transcript_delta(
+        self,
+        input_transcript: InputTranscriptChunksByItem,
+        item_id: str,
+        delta: str,
+    ) -> None:
+        """Record a Hugging Face partial transcript snapshot."""
+        input_transcript.item_id = item_id
+        input_transcript.deltas = [delta]
 
     async def _build_realtime_client(self) -> AsyncOpenAI:
         """Build the Hugging Face OpenAI-compatible realtime client."""

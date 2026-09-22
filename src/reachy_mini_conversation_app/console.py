@@ -8,11 +8,14 @@ import os
 import time
 import asyncio
 import logging
+from math import gcd
 from typing import Any, List, Optional
 from pathlib import Path
 from collections.abc import Callable
 
 import numpy as np
+from numpy.typing import NDArray
+from scipy.signal import firwin, lfilter
 
 from reachy_mini import ReachyMini
 from reachy_mini.io.jsonrpc import JsonRpcError
@@ -21,19 +24,27 @@ from reachy_mini.media.media_manager import MediaBackend
 from reachy_mini_conversation_app.config import (
     HF_BACKEND,
     LOCKED_PROFILE,
+    OPENAI_BACKEND,
+    OPENAI_API_KEY_ENV,
+    BACKEND_PROVIDER_ENV,
     HF_REALTIME_WS_URL_ENV,
+    OPENAI_REALTIME_MODELS,
     HF_LOCAL_CONNECTION_MODE,
+    OPENAI_REALTIME_MODEL_ENV,
     HF_DEPLOYED_CONNECTION_MODE,
     HF_REALTIME_CONNECTION_MODE_ENV,
     config,
     get_default_voice,
+    get_backend_choice,
     get_hf_session_url,
+    has_openai_api_key,
     set_custom_profile,
     get_available_voices,
     get_hf_direct_ws_url,
     build_hf_direct_ws_url,
     has_hf_realtime_target,
     parse_hf_direct_target,
+    get_openai_realtime_model,
     get_hf_connection_selection,
     refresh_runtime_config_from_env,
 )
@@ -98,6 +109,57 @@ LEGACY_STARTUP_ENV_NAMES = (
 BACKEND_RETRY_DELAY_SECONDS = 5.0
 
 
+class _StreamingResampler:
+    """Resample consecutive audio chunks without introducing boundary artifacts."""
+
+    def __init__(self, source_sample_rate: int, target_sample_rate: int) -> None:
+        if source_sample_rate <= 0 or target_sample_rate <= 0:
+            raise ValueError("Audio sample rates must be positive")
+
+        common_divisor = gcd(source_sample_rate, target_sample_rate)
+        self.source_sample_rate = source_sample_rate
+        self.target_sample_rate = target_sample_rate
+        self._up = target_sample_rate // common_divisor
+        self._down = source_sample_rate // common_divisor
+        max_rate = max(self._up, self._down)
+        self._taps = np.asarray(
+            firwin(20 * max_rate + 1, 1.0 / max_rate, window=("kaiser", 5.0)) * self._up,
+            dtype=np.float32,
+        )
+        self._filter_state: NDArray[np.float32] | None = None
+        self._sample_shape: tuple[int, ...] | None = None
+        self._downsample_phase = 0
+
+    def process(self, audio: NDArray[np.float32]) -> NDArray[np.float32]:
+        """Resample the next contiguous audio chunk."""
+        if audio.size == 0:
+            return audio
+
+        sample_axis = 1 if audio.ndim == 2 and audio.shape[1] > audio.shape[0] else 0
+        samples_first = np.moveaxis(audio, sample_axis, 0)
+        sample_shape = samples_first.shape[1:]
+        if self._sample_shape is not None and sample_shape != self._sample_shape:
+            raise ValueError("Audio channel shape changed while resampling")
+        self._sample_shape = sample_shape
+
+        upsampled = np.zeros((samples_first.shape[0] * self._up, *sample_shape), dtype=np.float32)
+        upsampled[:: self._up] = samples_first
+        if self._filter_state is None:
+            self._filter_state = np.zeros((self._taps.size - 1, *sample_shape), dtype=np.float32)
+
+        filtered, self._filter_state = lfilter(
+            self._taps,
+            [1.0],
+            upsampled,
+            axis=0,
+            zi=self._filter_state,
+        )
+        first_sample = (-self._downsample_phase) % self._down
+        self._downsample_phase = (self._downsample_phase + upsampled.shape[0]) % self._down
+        resampled = np.asarray(filtered[first_sample :: self._down], dtype=np.float32)
+        return np.moveaxis(resampled, 0, sample_axis)
+
+
 class LocalStream:
     """LocalStream using Reachy Mini's recorder/player."""
 
@@ -128,6 +190,7 @@ class LocalStream:
         self._settings_initialized = False
         self._asyncio_loop = None
         self._mic_muted = False  # mic starts live; the UI toggles it via the settings API
+        self._active_backend_name = get_backend_choice()
         self._backend_connection_state = "not_started"
         self._backend_error: str | None = None
         self._backend_retry_delay = BACKEND_RETRY_DELAY_SECONDS
@@ -254,6 +317,20 @@ class LocalStream:
         except Exception:
             return []
 
+    @staticmethod
+    def _has_required_configuration(backend: str) -> bool:
+        """Return whether a provider can start without more configuration."""
+        if backend == OPENAI_BACKEND:
+            return has_openai_api_key()
+        return has_hf_realtime_target()
+
+    @staticmethod
+    def _requirement_name(backend: str) -> str:
+        """Return the missing provider configuration name."""
+        if backend == OPENAI_BACKEND:
+            return OPENAI_API_KEY_ENV
+        return HF_REALTIME_WS_URL_ENV
+
     def _backend_connected(self) -> bool:
         """Return whether the active handler currently has a realtime connection."""
         try:
@@ -270,8 +347,12 @@ class LocalStream:
         """Create and install a fresh handler for the current runtime backend config."""
         if self._handler_factory is None:
             return self.handler
+        selected_backend = get_backend_choice()
+        if selected_backend != self._active_backend_name:
+            self._voice_override = None
         handler = self._handler_factory(self._voice_override)
         self._install_handler(handler)
+        self._active_backend_name = selected_backend
         return handler
 
     async def _shutdown_active_handler(self) -> None:
@@ -283,18 +364,15 @@ class LocalStream:
         except Exception as e:
             logger.debug("Active handler shutdown ignored during restart: %s", e)
 
-    def _mark_restart_requested(self, reason: str) -> None:
-        """Request a backend restart from a synchronous route handler."""
-        logger.info("Backend restart requested: %s", reason)
-        self._set_backend_connection_state("connecting")
-        loop = self._asyncio_loop
-        if loop is not None and loop.is_running():
-            asyncio.run_coroutine_threadsafe(self.request_backend_restart(reason), loop)
-            return
-        self._restart_requested.set()
-
     async def request_backend_restart(self, reason: str) -> None:
-        """Ask the startup loop to rebuild the backend and stop the current handler."""
+        """Ask the stream loop to rebuild the backend and stop the current handler."""
+        loop = self._asyncio_loop
+        if loop is not None and loop.is_running() and asyncio.get_running_loop() is not loop:
+            future = asyncio.run_coroutine_threadsafe(self.request_backend_restart(reason), loop)
+            await asyncio.wrap_future(future)
+            return
+
+        logger.info("Backend restart requested: %s", reason)
         self._set_backend_connection_state("connecting")
         self._restart_requested.set()
         await self._shutdown_active_handler()
@@ -308,12 +386,14 @@ class LocalStream:
         except asyncio.TimeoutError:
             pass
 
-    @staticmethod
-    def _format_backend_error(error: BaseException | str) -> str:
-        """Return a compact user-facing backend error string."""
+    def _format_backend_error(self, error: BaseException | str) -> str:
+        """Return a compact user-facing backend error without credential values."""
+        message = error if isinstance(error, str) else str(error).strip()
+        api_key = (config.OPENAI_API_KEY or "").strip()
+        if api_key:
+            message = message.replace(api_key, "[redacted]")
         if isinstance(error, str):
-            return error
-        message = str(error).strip()
+            return message
         if message:
             return f"{type(error).__name__}: {message}"
         return type(error).__name__
@@ -366,6 +446,9 @@ class LocalStream:
                 if not replaced:
                     lines.append(f"{env_name}={value}")
             final_text = "\n".join(lines) + "\n"
+            env_path.touch(mode=0o600, exist_ok=True)
+            if os.name == "posix":
+                env_path.chmod(0o600)
             env_path.write_text(final_text, encoding="utf-8")
             logger.info("Persisted %s to %s", ", ".join(sorted(normalized_updates)), env_path)
 
@@ -407,20 +490,6 @@ class LocalStream:
         except Exception as e:
             logger.warning("Failed to remove %s: %s", ", ".join(normalized_names), e)
 
-    def _persist_hf_direct_connection(self, host: str, port: int) -> None:
-        """Persist a direct Hugging Face websocket target."""
-        self._persist_env_values(
-            {
-                HF_REALTIME_CONNECTION_MODE_ENV: HF_LOCAL_CONNECTION_MODE,
-                HF_REALTIME_WS_URL_ENV: build_hf_direct_ws_url(host, port),
-            }
-        )
-
-    def _persist_hf_allocator_connection(self) -> None:
-        """Persist the deployed Hugging Face allocator mode."""
-        self._persist_env_values({HF_REALTIME_CONNECTION_MODE_ENV: HF_DEPLOYED_CONNECTION_MODE})
-        self._remove_persisted_env_values(("HF_REALTIME_SESSION_URL",))
-
     def _persist_personality(self, profile: Optional[str], voice_override: Optional[str] = None) -> None:
         """Persist startup profile and voice in instance-local UI settings."""
         if LOCKED_PROFILE is not None:
@@ -452,7 +521,7 @@ class LocalStream:
         set_custom_profile(profile)
         try:
             get_session_instructions()
-            get_session_voice(default=get_default_voice())
+            get_session_voice(default=get_default_voice(get_backend_choice()))
             initialize_tools(force=True)
         except Exception:
             set_custom_profile(previous_profile)
@@ -462,18 +531,23 @@ class LocalStream:
         return "Applied personality and restarting backend."
 
     async def get_available_voices(self) -> list[str]:
-        """Return the voices available for the Hugging Face backend."""
-        return get_available_voices()
+        """Return voices available for the selected provider."""
+        return get_available_voices(get_backend_choice())
 
     def get_current_voice(self) -> str:
-        """Return the currently selected voice override or profile voice."""
-        if self._voice_override:
-            return self._voice_override
-        try:
-            return get_session_voice(default=get_default_voice())
-        except Exception as exc:
-            logger.warning("Failed to resolve the current profile voice: %s", exc)
-            return get_default_voice()
+        """Return the current provider-supported voice override or profile voice."""
+        backend = get_backend_choice()
+        default_voice = get_default_voice(backend)
+        voice = self._voice_override
+        if not voice:
+            try:
+                voice = get_session_voice(default=default_voice)
+            except Exception as exc:
+                logger.warning("Failed to resolve the current profile voice: %s", exc)
+                return default_voice
+
+        voices_by_lowercase = {candidate.lower(): candidate for candidate in get_available_voices(backend)}
+        return voices_by_lowercase.get(voice.lower(), default_voice)
 
     async def change_voice(self, voice: str) -> str:
         """Change the voice through the active handler without rebuilding the backend."""
@@ -532,24 +606,35 @@ class LocalStream:
                 raise
 
         def _status_payload() -> dict[str, object]:
+            backend_provider = get_backend_choice()
+            active_backend = self._active_backend_name
+            has_openai_key = has_openai_api_key()
             hf_session_url = get_hf_session_url()
             hf_ws_url = get_hf_direct_ws_url()
             hf_direct_host, hf_direct_port = parse_hf_direct_target(hf_ws_url)
             hf_connection_selection = get_hf_connection_selection()
             has_hf_connection = hf_connection_selection.has_target
+            readiness_backend = backend_provider if self._can_rebuild_handler() else active_backend
+            can_proceed = self._has_required_configuration(readiness_backend)
             backend_connection = self._backend_connection_status()
             return {
-                "backend": HF_BACKEND,
-                "has_key": has_hf_connection,
+                "backend": backend_provider,
+                "backend_provider": backend_provider,
+                "active_backend": active_backend,
+                "has_key": can_proceed,
+                "has_openai_key": has_openai_key,
+                "openai_model": get_openai_realtime_model(),
+                "openai_models": list(OPENAI_REALTIME_MODELS),
                 "has_hf_session_url": bool(hf_session_url),
                 "has_hf_ws_url": bool(hf_ws_url),
                 "has_hf_connection": has_hf_connection,
                 "hf_connection_mode": hf_connection_selection.mode,
                 "hf_direct_host": hf_direct_host,
                 "hf_direct_port": hf_direct_port,
-                "can_proceed": has_hf_connection,
+                "can_proceed": can_proceed,
+                "can_proceed_with_openai": has_openai_key,
                 "can_proceed_with_hf": has_hf_connection,
-                "requires_restart": not self._can_rebuild_handler(),
+                "requires_restart": backend_provider != active_backend and not self._can_rebuild_handler(),
                 **backend_connection,
             }
 
@@ -602,35 +687,57 @@ class LocalStream:
             return {"muted": self._mic_muted}
 
         @rpc.method("backend.config")  # type: ignore[untyped-decorator]
-        def _rpc_backend_config(params: dict[str, object]) -> dict[str, object]:
-            hf_selection = get_hf_connection_selection()
-            hf_mode = str(params.get("hf_mode") or hf_selection.mode).strip().lower()
-            if hf_mode == HF_LOCAL_CONNECTION_MODE:
-                existing_host, existing_port = parse_hf_direct_target(hf_selection.direct_ws_url)
-                host = str(params.get("hf_host") or "").strip() or existing_host or ""
-                if not host:
-                    raise JsonRpcError("Hugging Face host required", reason="empty_hf_host", code=-32602)
-                if "://" in host or "/" in host or "?" in host or "#" in host:
-                    raise JsonRpcError("invalid Hugging Face host", reason="invalid_hf_host", code=-32602)
-                raw_port = params.get("hf_port")
-                port = int(raw_port) if isinstance(raw_port, (int, float, str)) else (existing_port or 8765)
-                if port < 1 or port > 65535:
-                    raise JsonRpcError("invalid Hugging Face port", reason="invalid_hf_port", code=-32602)
-                self._persist_hf_direct_connection(host, port)
-            elif hf_mode == HF_DEPLOYED_CONNECTION_MODE:
-                if not bool(get_hf_session_url()):
-                    raise JsonRpcError(
-                        "missing Hugging Face session url", reason="missing_hf_session_url", code=-32602
-                    )
-                self._persist_hf_allocator_connection()
-            else:
-                raise JsonRpcError("invalid Hugging Face mode", reason="invalid_hf_mode", code=-32602)
+        async def _rpc_backend_config(params: dict[str, object]) -> dict[str, object]:
+            backend = str(params.get("backend") or get_backend_choice()).strip().lower()
+            if backend not in {HF_BACKEND, OPENAI_BACKEND}:
+                raise JsonRpcError("invalid backend", reason="invalid_backend", code=-32602)
 
-            if self._can_rebuild_handler():
-                self._mark_restart_requested("backend_config_changed")
-                message = "Connection saved. Reconnecting backend."
+            updates = {BACKEND_PROVIDER_ENV: backend}
+            remove_stale_hf_session_url = False
+            if backend == OPENAI_BACKEND:
+                api_key = str(params.get("api_key") or "").strip()
+                if not api_key and not has_openai_api_key():
+                    raise JsonRpcError("OpenAI API key required", reason="empty_key", code=-32602)
+                model = str(params.get("openai_model") or get_openai_realtime_model()).strip()
+                if model not in OPENAI_REALTIME_MODELS:
+                    raise JsonRpcError("invalid OpenAI Realtime model", reason="invalid_openai_model", code=-32602)
+                updates[OPENAI_REALTIME_MODEL_ENV] = model
+                if api_key:
+                    updates[OPENAI_API_KEY_ENV] = api_key
             else:
-                message = "Connection saved. Restart Reachy Mini Conversation from the desktop app to apply it."
+                hf_selection = get_hf_connection_selection()
+                hf_mode = str(params.get("hf_mode") or hf_selection.mode).strip().lower()
+                if hf_mode == HF_LOCAL_CONNECTION_MODE:
+                    existing_host, existing_port = parse_hf_direct_target(hf_selection.direct_ws_url)
+                    host = str(params.get("hf_host") or "").strip() or existing_host or ""
+                    if not host:
+                        raise JsonRpcError("Hugging Face host required", reason="empty_hf_host", code=-32602)
+                    if "://" in host or "/" in host or "?" in host or "#" in host:
+                        raise JsonRpcError("invalid Hugging Face host", reason="invalid_hf_host", code=-32602)
+                    raw_port = params.get("hf_port")
+                    port = int(raw_port) if isinstance(raw_port, (int, float, str)) else (existing_port or 8765)
+                    if port < 1 or port > 65535:
+                        raise JsonRpcError("invalid Hugging Face port", reason="invalid_hf_port", code=-32602)
+                    updates[HF_REALTIME_CONNECTION_MODE_ENV] = HF_LOCAL_CONNECTION_MODE
+                    updates[HF_REALTIME_WS_URL_ENV] = build_hf_direct_ws_url(host, port)
+                elif hf_mode == HF_DEPLOYED_CONNECTION_MODE:
+                    if not bool(get_hf_session_url()):
+                        raise JsonRpcError(
+                            "missing Hugging Face session url", reason="missing_hf_session_url", code=-32602
+                        )
+                    updates[HF_REALTIME_CONNECTION_MODE_ENV] = HF_DEPLOYED_CONNECTION_MODE
+                    remove_stale_hf_session_url = True
+                else:
+                    raise JsonRpcError("invalid Hugging Face mode", reason="invalid_hf_mode", code=-32602)
+
+            self._persist_env_values(updates)
+            if remove_stale_hf_session_url:
+                self._remove_persisted_env_values(("HF_REALTIME_SESSION_URL",))
+            if self._can_rebuild_handler():
+                await self.request_backend_restart("backend_config_changed")
+                message = "Backend saved. Reconnecting backend."
+            else:
+                message = "Backend saved. Restart Reachy Mini Conversation from the desktop app to apply it."
             return {"ok": True, "message": message, **_status_payload()}
 
         rpc.mount(settings_app)
@@ -678,7 +785,8 @@ class LocalStream:
     async def _run_handler_startup_loop(self) -> None:
         """Start the realtime handler and keep settings UI alive after backend failures."""
         while not self._stop_event.is_set():
-            if self._restart_requested.is_set():
+            selected_backend = get_backend_choice()
+            if selected_backend != self._active_backend_name or self._restart_requested.is_set():
                 await self._shutdown_active_handler()
                 if not self._can_rebuild_handler():
                     self._restart_requested.clear()
@@ -691,18 +799,18 @@ class LocalStream:
                 except Exception as e:
                     self._set_backend_connection_state("disconnected", e)
                     logger.warning(
-                        "Backend handler failed to initialize: %s. Retrying in %.1f seconds.",
-                        e,
+                        "%s backend handler failed to initialize: %s. Retrying in %.1f seconds.",
+                        selected_backend,
+                        self._format_backend_error(e),
                         self._backend_retry_delay,
-                        exc_info=logger.isEnabledFor(logging.DEBUG),
                     )
                     await self._sleep_or_restart_requested(self._backend_retry_delay)
                     continue
 
-            if not has_hf_realtime_target():
-                self._set_backend_connection_state(
-                    "waiting_for_config", f"{HF_REALTIME_WS_URL_ENV} is not configured."
-                )
+            active_backend = self._active_backend_name
+            if not self._has_required_configuration(active_backend):
+                requirement_name = self._requirement_name(active_backend)
+                self._set_backend_connection_state("waiting_for_config", f"{requirement_name} is not configured.")
                 await self._sleep_or_restart_requested(0.5)
                 continue
 
@@ -714,20 +822,21 @@ class LocalStream:
             except Exception as e:
                 self._set_backend_connection_state("disconnected", e)
                 logger.warning(
-                    "Backend failed to start: %s. Settings UI remains available; retrying in %.1f seconds.",
-                    e,
+                    "%s backend failed to start: %s. Settings UI remains available; retrying in %.1f seconds.",
+                    active_backend,
+                    self._format_backend_error(e),
                     self._backend_retry_delay,
-                    exc_info=logger.isEnabledFor(logging.DEBUG),
                 )
             else:
                 if self._stop_event.is_set():
                     return
                 self._set_backend_connection_state("disconnected")
                 if self._restart_requested.is_set():
-                    logger.info("Backend stopped for requested restart.")
+                    logger.info("%s backend stopped for requested restart.", active_backend)
                     continue
                 logger.info(
-                    "Backend session ended. Settings UI remains available; retrying in %.1f seconds.",
+                    "%s backend session ended. Settings UI remains available; retrying in %.1f seconds.",
+                    active_backend,
                     self._backend_retry_delay,
                 )
 
@@ -758,22 +867,22 @@ class LocalStream:
         # (do this AFTER loading the instance .env so status endpoint sees the right value)
         self._init_settings_ui_if_needed()
 
-        # If the Hugging Face target is still missing -> wait until provided via the settings UI
-        if not has_hf_realtime_target():
-            self._set_backend_connection_state("waiting_for_config", f"{HF_REALTIME_WS_URL_ENV} is not configured.")
+        selected_backend = get_backend_choice()
+        if not self._has_required_configuration(selected_backend):
+            requirement_name = self._requirement_name(selected_backend)
+            self._set_backend_connection_state("waiting_for_config", f"{requirement_name} is not configured.")
             if self._settings_app is None:
-                logger.error(
-                    "%s not found. Set it in the app .env before starting the Hugging Face backend.",
-                    HF_REALTIME_WS_URL_ENV,
-                )
+                logger.error("%s not found. Set it in the app .env before starting.", requirement_name)
                 return
-            logger.warning("%s not found. Open the app settings page to configure it.", HF_REALTIME_WS_URL_ENV)
-            # Poll until a target becomes available (set via the settings UI)
+            logger.warning("%s not found. Open the app settings page to configure it.", requirement_name)
             try:
-                while not self._stop_event.is_set() and not has_hf_realtime_target():
+                while not self._stop_event.is_set():
+                    selected_backend = get_backend_choice()
+                    if self._has_required_configuration(selected_backend):
+                        break
                     time.sleep(0.2)
             except KeyboardInterrupt:
-                logger.info("Interrupted while waiting for Hugging Face configuration.")
+                logger.info("Interrupted while waiting for backend configuration.")
                 return
             if self._stop_event.is_set():
                 return
@@ -874,17 +983,29 @@ class LocalStream:
     async def record_loop(self) -> None:
         """Read mic frames from the recorder and forward them to the handler."""
         input_sample_rate = self._robot.media.get_input_audio_samplerate()
+        resampler: _StreamingResampler | None = None
         logger.debug(f"Audio recording started at {input_sample_rate} Hz")
 
         while not self._stop_event.is_set():
             audio_frame = self._robot.media.get_audio_sample()
             if audio_frame is not None and not self._mic_muted:
-                await self.handler.receive((input_sample_rate, audio_frame))
+                handler = self.handler
+                handler_sample_rate = handler.SAMPLE_RATE
+                backend_audio = audio_frame
+                if input_sample_rate != handler_sample_rate:
+                    if resampler is None or resampler.target_sample_rate != handler_sample_rate:
+                        resampler = _StreamingResampler(input_sample_rate, handler_sample_rate)
+                    backend_audio = resampler.process(audio_to_float32(audio_frame))
+                else:
+                    resampler = None
+                await handler.receive((handler_sample_rate, backend_audio))
                 self._emit_level("user", audio_frame)
             await asyncio.sleep(0)  # avoid busy loop
 
     async def play_loop(self) -> None:
         """Fetch outputs from the handler: log text and play audio frames."""
+        output_sample_rate = self._robot.media.get_output_audio_samplerate()
+        resampler: _StreamingResampler | None = None
         while not self._stop_event.is_set():
             handler = self.handler
             try:
@@ -903,7 +1024,7 @@ class LocalStream:
                         )
 
             elif isinstance(handler_output, tuple):
-                _, audio_data = handler_output
+                sample_rate, audio_data = handler_output
 
                 # Skip empty audio frames
                 if audio_data.size == 0:
@@ -920,6 +1041,12 @@ class LocalStream:
 
                 # Cast if needed
                 audio_frame = audio_to_float32(audio_data)
+                if sample_rate != output_sample_rate:
+                    if resampler is None or resampler.source_sample_rate != sample_rate:
+                        resampler = _StreamingResampler(sample_rate, output_sample_rate)
+                    audio_frame = resampler.process(audio_frame)
+                else:
+                    resampler = None
 
                 self._robot.media.push_audio_sample(audio_frame)
                 self._emit_level("assistant", audio_frame)
