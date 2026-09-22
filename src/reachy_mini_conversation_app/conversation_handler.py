@@ -36,6 +36,7 @@ class ConversationHandler(AsyncStreamHandler, ABC):
     last_idle_behavior_time: float
     _activity_observer: Callable[[str], None] | None = None
     _transcript_observer: Callable[[str, str, bool], None] | None = None
+    _transcript_command_handler: Callable[[str], bool] | None = None
 
     def __init__(self) -> None:
         """Initialize the stream handler and shared idle/activity tracking."""
@@ -50,6 +51,21 @@ class ConversationHandler(AsyncStreamHandler, ABC):
     def set_transcript_observer(self, observer: Callable[[str, str, bool], None] | None) -> None:
         """Attach/detach a transcript observer, called (role, text, final)."""
         self._transcript_observer = observer
+
+    def set_transcript_command_handler(self, handler: Callable[[str], bool] | None) -> None:
+        """Attach a handler that consumes matching final user transcripts."""
+        self._transcript_command_handler = handler
+
+    def _handle_transcript_command(self, transcript: str) -> bool:
+        """Return whether a local command consumed the transcript."""
+        handler = self._transcript_command_handler
+        if handler is None:
+            return False
+        try:
+            return handler(transcript)
+        except Exception:
+            logger.exception("Transcript command handler failed")
+            return False
 
     def _emit_transcript(self, role: str, text: str, final: bool = True) -> None:
         """Forward one transcript chunk to the observer, if attached."""

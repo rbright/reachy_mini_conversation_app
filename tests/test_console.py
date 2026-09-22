@@ -21,6 +21,7 @@ import reachy_mini_conversation_app.console as console_mod
 from reachy_mini_conversation_app.config import HF_AVAILABLE_VOICES, OPENAI_AVAILABLE_VOICES, config
 from reachy_mini_conversation_app.console import LocalStream
 from reachy_mini_conversation_app.streaming import AdditionalOutputs
+from reachy_mini_conversation_app.wake_word import WakeWordEvent
 from reachy_mini_conversation_app.startup_settings import (
     StartupSettings,
     load_startup_settings_into_runtime,
@@ -899,6 +900,97 @@ async def test_record_loop_forwards_unmuted_frames() -> None:
     await stream.record_loop()
 
     handler.receive.assert_awaited_once_with((16000, frame))
+
+
+@pytest.mark.asyncio
+async def test_record_loop_opens_wake_gate_before_forwarding_audio() -> None:
+    """A local wake event wakes the robot and starts forwarding microphone audio."""
+    frame = np.zeros(1280, dtype=np.int16)
+    robot = _audio_robot(get_input_audio_samplerate=MagicMock(return_value=16000), get_audio_sample=MagicMock())
+    handler = MagicMock()
+    handler.SAMPLE_RATE = 16000
+    handler.receive = AsyncMock()
+    detector = MagicMock()
+    detector.process.return_value = WakeWordEvent(model="hey_emma", score=0.9)
+    on_wake_word = MagicMock()
+    stream = LocalStream(handler, robot, wake_word_detector=detector, on_wake_word=on_wake_word)
+    robot.media.get_audio_sample.side_effect = _stop_after(stream, frame)
+
+    await stream.record_loop()
+
+    on_wake_word.assert_called_once_with()
+    handler.receive.assert_awaited_once_with((16000, frame))
+
+
+@pytest.mark.asyncio
+async def test_sleep_phrase_closes_gate_without_stopping_detector() -> None:
+    """A configured sleep transcript stops the session and preserves wake detection."""
+    handler = MagicMock()
+    handler.output_queue = asyncio.Queue()
+    robot = _audio_robot()
+    on_sleep_phrase = MagicMock()
+    stream = LocalStream(
+        handler,
+        robot,
+        wake_word_detector=MagicMock(),
+        sleep_phrases=("goodbye emma",),
+        on_sleep_phrase=on_sleep_phrase,
+    )
+    stream._wake_gate_open = True
+    stream._wake_gate_event.set()
+    stream._shutdown_active_handler = AsyncMock()
+
+    consumed = stream._handle_transcript_command("Okay. Goodbye, Emma!")
+    await _wait_until(lambda: on_sleep_phrase.called)
+
+    assert consumed is True
+    assert stream._wake_gate_open is False
+    assert stream._wake_word_detector is not None
+    stream._shutdown_active_handler.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_wake_waits_for_sleep_transition() -> None:
+    """A new wake cannot race the robot's pending sleep transition."""
+    sleep_started = threading.Event()
+    release_sleep = threading.Event()
+    transitions: list[str] = []
+
+    def enter_sleep() -> None:
+        sleep_started.set()
+        assert release_sleep.wait(timeout=5.0)
+        transitions.append("sleep")
+
+    def wake_up() -> None:
+        transitions.append("wake")
+
+    handler = MagicMock()
+    handler.output_queue = asyncio.Queue()
+    stream = LocalStream(
+        handler,
+        _audio_robot(),
+        wake_word_detector=MagicMock(),
+        sleep_phrases=("goodbye emma",),
+        on_wake_word=wake_up,
+        on_sleep_phrase=enter_sleep,
+    )
+    stream._wake_gate_open = True
+    stream._wake_gate_event.set()
+    stream._shutdown_active_handler = AsyncMock()
+
+    assert stream._handle_transcript_command("Goodbye Emma") is True
+    await _wait_until(sleep_started.is_set)
+
+    wake_task = asyncio.create_task(stream._handle_wake_event(WakeWordEvent(model="hey_emma", score=0.9)))
+    try:
+        await asyncio.sleep(0)
+        assert transitions == []
+    finally:
+        release_sleep.set()
+    await wake_task
+
+    assert transitions == ["sleep", "wake"]
+    assert stream._wake_gate_open is True
 
 
 @pytest.mark.asyncio

@@ -50,6 +50,12 @@ from reachy_mini_conversation_app.config import (
 )
 from reachy_mini_conversation_app.prompts import get_session_voice, get_session_instructions
 from reachy_mini_conversation_app.streaming import AdditionalOutputs, audio_to_float32
+from reachy_mini_conversation_app.wake_word import (
+    WAKE_WORD_SAMPLE_RATE,
+    WakeWordEvent,
+    WakeWordDetector,
+    matches_sleep_phrase,
+)
 from reachy_mini_conversation_app.startup_settings import read_startup_settings, write_startup_settings
 from reachy_mini_conversation_app.tools.core_tools import initialize_tools
 from reachy_mini_conversation_app.tool_space_routes import register_tool_space_methods
@@ -172,6 +178,10 @@ class LocalStream:
         instance_path: Optional[str] = None,
         handler_factory: HandlerFactory | None = None,
         startup_voice: Optional[str] = None,
+        wake_word_detector: WakeWordDetector | None = None,
+        sleep_phrases: tuple[str, ...] = (),
+        on_wake_word: Callable[[], None] | None = None,
+        on_sleep_phrase: Callable[[], None] | None = None,
     ):
         """Initialize the stream with a realtime handler and pipelines.
 
@@ -190,6 +200,16 @@ class LocalStream:
         self._settings_initialized = False
         self._asyncio_loop = None
         self._mic_muted = False  # mic starts live; the UI toggles it via the settings API
+        self._wake_word_detector = wake_word_detector
+        self._sleep_phrases = sleep_phrases
+        self._on_wake_word = on_wake_word
+        self._on_sleep_phrase = on_sleep_phrase
+        self._wake_gate_open = wake_word_detector is None
+        self._wake_gate_event = asyncio.Event()
+        if self._wake_gate_open:
+            self._wake_gate_event.set()
+        self._sleep_transition_complete = asyncio.Event()
+        self._sleep_transition_complete.set()
         self._active_backend_name = get_backend_choice()
         self._backend_connection_state = "not_started"
         self._backend_error: str | None = None
@@ -217,6 +237,9 @@ class LocalStream:
         transcript_setter = getattr(self.handler, "set_transcript_observer", None)
         if callable(transcript_setter):
             transcript_setter(self._dispatch_transcript)
+        command_setter = getattr(self.handler, "set_transcript_command_handler", None)
+        if callable(command_setter):
+            command_setter(self._handle_transcript_command)
 
     def _dispatch_transcript(self, role: str, text: str, final: bool) -> None:
         """Push a conversation.transcript notification to JSON-RPC clients."""
@@ -278,6 +301,65 @@ class LocalStream:
         """Push a conversation.phase notification to JSON-RPC clients."""
         if self._rpc is not None:
             self._rpc.broadcast_threadsafe("conversation.phase", {"phase": phase, "reason": reason})
+
+    def _handle_transcript_command(self, transcript: str) -> bool:
+        """Consume configured sleep phrases before the realtime model responds."""
+        if self._wake_word_detector is None or not self._wake_gate_open:
+            return False
+        if not matches_sleep_phrase(transcript, self._sleep_phrases):
+            return False
+
+        logger.info("Sleep phrase detected")
+        self._wake_gate_open = False
+        self._wake_gate_event.clear()
+        self._sleep_transition_complete.clear()
+        self._restart_requested.set()
+        self.clear_audio_queue()
+        asyncio.create_task(self._enter_sleep_mode(), name="wake-word-sleep")
+        return True
+
+    async def _enter_sleep_mode(self) -> None:
+        """Close the active conversation and move the robot to sleep."""
+        try:
+            await self._shutdown_active_handler()
+            if self._on_sleep_phrase is not None:
+                try:
+                    await asyncio.to_thread(self._on_sleep_phrase)
+                except Exception:
+                    logger.exception("Failed to put Reachy Mini to sleep after a sleep phrase")
+            self._emit_phase("sleeping", "sleep_phrase")
+        finally:
+            self._sleep_transition_complete.set()
+
+    async def _handle_wake_event(self, event: WakeWordEvent) -> None:
+        """Wake the robot and open a fresh realtime conversation."""
+        if self._wake_gate_open:
+            return
+
+        await self._sleep_transition_complete.wait()
+        logger.info("Wake word detected via %s (%.2f)", event.model, event.score)
+        if self._on_wake_word is not None:
+            try:
+                await asyncio.to_thread(self._on_wake_word)
+            except Exception:
+                logger.exception("Failed to wake Reachy Mini after wake-word detection")
+                return
+
+        self._wake_gate_open = True
+        self._wake_gate_event.set()
+        self._emit_phase("ready", "wake_word")
+
+    async def _disable_wake_word_gate(self) -> None:
+        """Restore always-on behavior after a detector failure."""
+        self._wake_word_detector = None
+        await self._sleep_transition_complete.wait()
+        self._wake_gate_open = True
+        self._wake_gate_event.set()
+        if self._on_wake_word is not None:
+            try:
+                await asyncio.to_thread(self._on_wake_word)
+            except Exception:
+                logger.exception("Failed to restore the active robot state after disabling wake gating")
 
     def seconds_since_activity(self) -> float:
         """Seconds since the live handler last saw conversation activity."""
@@ -785,6 +867,10 @@ class LocalStream:
     async def _run_handler_startup_loop(self) -> None:
         """Start the realtime handler and keep settings UI alive after backend failures."""
         while not self._stop_event.is_set():
+            if self._wake_word_detector is not None and not self._wake_gate_open:
+                self._set_backend_connection_state("sleeping")
+                await self._wake_gate_event.wait()
+                continue
             selected_backend = get_backend_choice()
             if selected_backend != self._active_backend_name or self._restart_requested.is_set():
                 await self._shutdown_active_handler()
@@ -896,6 +982,12 @@ class LocalStream:
             # Capture loop for cross-thread personality actions
             loop = asyncio.get_running_loop()
             self._asyncio_loop = loop  # type: ignore[assignment]
+            if self._wake_word_detector is not None:
+                try:
+                    await asyncio.to_thread(self._wake_word_detector.load)
+                except Exception:
+                    logger.exception("Wake-word detector failed to load; continuing without wake gating")
+                    await self._disable_wake_word_gate()
             # Connect the backend first so it overlaps the warmup and audio config below.
             handler_task = asyncio.create_task(self._run_handler_startup_loop(), name="realtime-handler")
             self._tasks = [handler_task]
@@ -981,24 +1073,45 @@ class LocalStream:
                 break
 
     async def record_loop(self) -> None:
-        """Read mic frames from the recorder and forward them to the handler."""
+        """Detect wake words and forward audio while the wake gate is open."""
         input_sample_rate = self._robot.media.get_input_audio_samplerate()
-        resampler: _StreamingResampler | None = None
-        logger.debug(f"Audio recording started at {input_sample_rate} Hz")
+        backend_resampler: _StreamingResampler | None = None
+        wake_word_resampler: _StreamingResampler | None = None
+        logger.debug("Audio recording started at %s Hz", input_sample_rate)
 
         while not self._stop_event.is_set():
             audio_frame = self._robot.media.get_audio_sample()
             if audio_frame is not None and not self._mic_muted:
-                handler = self.handler
-                handler_sample_rate = handler.SAMPLE_RATE
-                backend_audio = audio_frame
-                if input_sample_rate != handler_sample_rate:
-                    if resampler is None or resampler.target_sample_rate != handler_sample_rate:
-                        resampler = _StreamingResampler(input_sample_rate, handler_sample_rate)
-                    backend_audio = resampler.process(audio_to_float32(audio_frame))
+                detector = self._wake_word_detector
+                if detector is not None and not self._wake_gate_open:
+                    wake_word_audio = audio_frame
+                    if input_sample_rate != WAKE_WORD_SAMPLE_RATE:
+                        if wake_word_resampler is None:
+                            wake_word_resampler = _StreamingResampler(input_sample_rate, WAKE_WORD_SAMPLE_RATE)
+                        wake_word_audio = wake_word_resampler.process(audio_to_float32(audio_frame))
+                    try:
+                        event = detector.process(wake_word_audio)
+                    except Exception:
+                        logger.exception("Wake-word inference failed; continuing without wake gating")
+                        await self._disable_wake_word_gate()
+                    else:
+                        if event is not None:
+                            await self._handle_wake_event(event)
                 else:
-                    resampler = None
-                await handler.receive((handler_sample_rate, backend_audio))
+                    wake_word_resampler = None
+
+                if self._wake_gate_open:
+                    handler = self.handler
+                    handler_sample_rate = handler.SAMPLE_RATE
+                    backend_audio = audio_frame
+                    if input_sample_rate != handler_sample_rate:
+                        if backend_resampler is None or backend_resampler.target_sample_rate != handler_sample_rate:
+                            backend_resampler = _StreamingResampler(input_sample_rate, handler_sample_rate)
+                        backend_audio = backend_resampler.process(audio_to_float32(audio_frame))
+                    else:
+                        backend_resampler = None
+                    await handler.receive((handler_sample_rate, backend_audio))
+
                 self._emit_level("user", audio_frame)
             await asyncio.sleep(0)  # avoid busy loop
 
@@ -1007,6 +1120,9 @@ class LocalStream:
         output_sample_rate = self._robot.media.get_output_audio_samplerate()
         resampler: _StreamingResampler | None = None
         while not self._stop_event.is_set():
+            if self._wake_word_detector is not None and not self._wake_gate_open:
+                await self._wake_gate_event.wait()
+                continue
             handler = self.handler
             try:
                 handler_output = await asyncio.wait_for(handler.emit(), timeout=0.5)

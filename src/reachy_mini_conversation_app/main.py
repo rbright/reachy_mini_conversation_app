@@ -135,6 +135,7 @@ def run(
         config,
         set_instance_path,
         get_backend_choice,
+        resolve_wake_word_settings,
         get_hf_connection_selection,
         resolve_app_timeout_minutes,
         refresh_runtime_config_from_env,
@@ -181,6 +182,11 @@ def run(
         )
 
     from reachy_mini_conversation_app.console import LocalStream
+    from reachy_mini_conversation_app.wake_word import (
+        DEFAULT_SLEEP_PHRASES,
+        PACKAGED_WAKE_WORD_MODEL,
+        WakeWordDetector,
+    )
     from reachy_mini_conversation_app.tools.core_tools import ToolDependencies
     from reachy_mini_conversation_app.conversation_handler import ConversationHandler
 
@@ -208,9 +214,31 @@ def run(
             logger.error("Please check your configuration and try again.")
             sys.exit(1)
 
-    app_lifecycle.wake_up_if_sleeping(robot, logger)
-
     movement_manager = MovementManager(current_robot=robot)
+    wake_word_settings = resolve_wake_word_settings(DEFAULT_SLEEP_PHRASES)
+    wake_word_detector: WakeWordDetector | None = None
+    if wake_word_settings.enabled:
+        wake_word_model_path = (
+            Path(wake_word_settings.model_path).expanduser()
+            if wake_word_settings.model_path is not None
+            else PACKAGED_WAKE_WORD_MODEL
+        )
+        wake_word_detector = WakeWordDetector(
+            model_path=wake_word_model_path,
+            threshold=wake_word_settings.threshold,
+        )
+    else:
+        app_lifecycle.wake_up_if_sleeping(robot, logger)
+
+    def wake_from_wake_word() -> None:
+        app_lifecycle.wake_up_if_sleeping(robot, logger)
+        movement_manager.start()
+        robot.enable_wobbling()
+
+    def sleep_from_phrase() -> None:
+        robot.disable_wobbling()
+        movement_manager.stop(reset_to_neutral=False)
+        robot.goto_sleep()
 
     deps = ToolDependencies(
         reachy_mini=robot,
@@ -269,6 +297,10 @@ def run(
         instance_path=instance_path,
         handler_factory=build_handler,
         startup_voice=startup_settings.voice,
+        wake_word_detector=wake_word_detector,
+        sleep_phrases=wake_word_settings.sleep_phrases,
+        on_wake_word=wake_from_wake_word,
+        on_sleep_phrase=sleep_from_phrase,
     )
 
     # The page is served immediately, so the API must be live before the slow startup work below.
@@ -348,12 +380,16 @@ def run(
         logger.error("Failed to initialize tools: %s", e)
         sys.exit(1)
 
-    # Each async service → its own thread/loop
-    movement_manager.start()
-    # Audio-reactive head motion is driven by the daemon's wobbler, which
-    # taps the media pipeline at push_audio_sample. The console stream pushes
-    # assistant audio through that pipeline directly.
-    robot.enable_wobbling()
+    # Each async service gets its own thread or event loop.
+    if wake_word_detector is None:
+        movement_manager.start()
+        robot.enable_wobbling()
+    else:
+        try:
+            robot.disable_wobbling()
+        except Exception as e:
+            logger.debug("Error disabling wobbling while waiting for the wake word: %s", e)
+        logger.info("Wake-word gate enabled; say the configured wake phrase to start a conversation.")
 
     timeout_minutes = resolve_app_timeout_minutes()
     if timeout_minutes is not None:

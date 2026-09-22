@@ -30,6 +30,7 @@
 *.afdesign lfs
 # Models
 *.pth lfs
+*.onnx lfs
 # Binaries
 *.bin lfs
 *.pkl lfs
