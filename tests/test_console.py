@@ -553,8 +553,15 @@ async def test_startup_loop_rebuilds_handler_on_restart_request(monkeypatch: pyt
             return None
 
     handlers: list[FakeHandler] = []
+    fail_next_build = False
+    failed_builds = 0
 
     def handler_factory(_voice: str | None) -> FakeHandler:
+        nonlocal fail_next_build, failed_builds
+        if fail_next_build:
+            fail_next_build = False
+            failed_builds += 1
+            raise RuntimeError("transient handler build failure")
         handler = FakeHandler()
         handlers.append(handler)
         return handler
@@ -582,12 +589,14 @@ async def test_startup_loop_rebuilds_handler_on_restart_request(monkeypatch: pyt
         stream._restart_requested.set()
         await stream._shutdown_active_handler()
         await asyncio.sleep(0)
+        fail_next_build = True
 
         stream._wake_gate_event.set()
         await _wait_until(lambda: len(handlers) == 3 and handlers[2].started.is_set())
 
         assert stream.handler is handlers[2]
         assert stream._wake_handler_ready.is_set()
+        assert failed_builds == 1
     finally:
         stream._stop_event.set()
         await stream._shutdown_active_handler()
@@ -1144,6 +1153,27 @@ async def test_play_loop_pushes_mono_audio_as_float32() -> None:
     pushed = robot.media.push_audio_sample.call_args.args[0]
     assert pushed.ndim == 1
     assert pushed.dtype == np.float32
+
+
+@pytest.mark.asyncio
+async def test_play_loop_discards_output_when_sleep_closes_gate() -> None:
+    """Audio returned after a sleep transition must not reach the speaker."""
+    robot = _audio_robot(push_audio_sample=MagicMock())
+    handler = MagicMock()
+    stream = LocalStream(handler, robot, wake_word_detector=MagicMock())
+    stream._wake_gate_open = True
+    stream._conversation_ready.set()
+
+    async def emit_after_sleep() -> tuple[int, NDArray[np.int16]]:
+        stream._wake_gate_open = False
+        stream._conversation_ready.clear()
+        stream._stop_event.set()
+        return 16000, np.zeros(4, dtype=np.int16)
+
+    handler.emit = emit_after_sleep
+    await stream.play_loop()
+
+    robot.media.push_audio_sample.assert_not_called()
 
 
 @pytest.mark.asyncio
