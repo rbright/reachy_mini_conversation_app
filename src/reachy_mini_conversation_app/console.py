@@ -893,6 +893,7 @@ class LocalStream:
                     self._build_handler_for_current_backend()
                     self._wake_handler_ready.set()
                 except Exception as e:
+                    self._active_backend_name = ""
                     self._set_backend_connection_state("disconnected", e)
                     logger.warning(
                         "%s backend handler failed to initialize: %s. Retrying in %.1f seconds.",
@@ -1137,6 +1138,8 @@ class LocalStream:
             try:
                 handler_output = await asyncio.wait_for(handler.emit(), timeout=0.5)
             except asyncio.TimeoutError:
+                continue
+            if (self._wake_word_detector is not None and not self._wake_gate_open) or handler is not self.handler:
                 continue
 
             if isinstance(handler_output, AdditionalOutputs):
