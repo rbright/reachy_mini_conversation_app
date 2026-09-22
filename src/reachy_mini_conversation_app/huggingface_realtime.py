@@ -983,12 +983,15 @@ class OpenAICompatibleRealtimeHandler(ConversationHandler, ABC):
             frame: A tuple containing (sample_rate, audio_data).
 
         """
-        if not self.connection:
-            return
-
         _, audio_frame = frame
         if audio_frame.size == 0:
             return
+        connection = self.connection
+        if connection is None:
+            await self._connected_event.wait()
+            connection = self.connection
+            if connection is None:
+                return
 
         # Reshape if needed
         if audio_frame.ndim == 2:
@@ -1005,7 +1008,7 @@ class OpenAICompatibleRealtimeHandler(ConversationHandler, ABC):
         # Send to the realtime input buffer (guard against races during reconnect).
         try:
             audio_message = base64.b64encode(audio_frame.tobytes()).decode("utf-8")
-            await self.connection.input_audio_buffer.append(audio=audio_message)
+            await connection.input_audio_buffer.append(audio=audio_message)
         except Exception as e:
             logger.debug("Dropping audio frame: connection not ready (%s)", e)
             return
@@ -1029,6 +1032,7 @@ class OpenAICompatibleRealtimeHandler(ConversationHandler, ABC):
                 logger.debug(f"connection.close() ignored: {e}")
             finally:
                 self.connection = None
+                self._connected_event.clear()
 
         # Clear any remaining items in the output queue
         while not self.output_queue.empty():
