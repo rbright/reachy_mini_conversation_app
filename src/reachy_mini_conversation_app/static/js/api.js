@@ -160,6 +160,7 @@ export const resetProfileTools = (profile) =>
 const ERROR_MESSAGES = Object.freeze({
   invalid_backend: "Unknown backend selected.",
   empty_key: "An API key is required for this backend.",
+  invalid_openai_model: "Choose a supported OpenAI Realtime model.",
   empty_hf_host: "Enter a Hugging Face host.",
   invalid_hf_host: "That Hugging Face host doesn't look right.",
   invalid_hf_port: "That Hugging Face port doesn't look right.",

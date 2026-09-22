@@ -40,3 +40,27 @@ def test_inactivity_timeout_thread_closes_stream_manager_without_sleep_callback(
     thread.join(timeout=1.0)
     assert not thread.is_alive()
     stream_manager.close.assert_called_once_with()
+
+
+def test_standalone_ui_uses_stable_writable_instance_path(tmp_path, monkeypatch) -> None:
+    """Two standalone UI launches share the same persistent settings directory."""
+    args = SimpleNamespace(command=None, ui=True)
+    paths = []
+    previous_contents = []
+
+    def run(_args, *, instance_path=None) -> None:
+        path = main_mod.Path(instance_path)
+        paths.append(path)
+        settings_path = path / ".env"
+        previous_contents.append(settings_path.read_text(encoding="utf-8") if settings_path.exists() else None)
+        settings_path.write_text("BACKEND_PROVIDER=openai\n", encoding="utf-8")
+
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    monkeypatch.setattr(main_mod, "parse_args", lambda: (args, []))
+    monkeypatch.setattr(main_mod, "run", run)
+
+    main_mod.main()
+    main_mod.main()
+
+    assert paths == [tmp_path / "reachy_mini_conversation_app"] * 2
+    assert previous_contents == [None, "BACKEND_PROVIDER=openai\n"]

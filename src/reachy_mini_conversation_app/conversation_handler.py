@@ -9,7 +9,7 @@ from collections.abc import Callable
 import numpy as np
 from numpy.typing import NDArray
 
-from reachy_mini_conversation_app.streaming import AdditionalOutputs, AsyncStreamHandler, wait_for_item
+from reachy_mini_conversation_app.streaming import AudioArray, AdditionalOutputs, AsyncStreamHandler, wait_for_item
 from reachy_mini_conversation_app.idle_policy import start_idle_tool_call
 from reachy_mini_conversation_app.tools.core_tools import ToolDependencies, get_tool_specs
 from reachy_mini_conversation_app.tools.background_tool_manager import BackgroundToolManager
@@ -26,6 +26,7 @@ QueueItem: TypeAlias = AudioFrame | AdditionalOutputs
 class ConversationHandler(AsyncStreamHandler, ABC):
     """Shared app handler contract and idle behavior for realtime conversation backends."""
 
+    SAMPLE_RATE: ClassVar[int] = 16000
     IDLE_BEHAVIOR_THRESHOLD_S: ClassVar[float] = 180.0
 
     deps: ToolDependencies
@@ -124,7 +125,7 @@ class ConversationHandler(AsyncStreamHandler, ABC):
         ...
 
     @abstractmethod
-    async def receive(self, frame: AudioFrame) -> None:
+    async def receive(self, frame: tuple[int, AudioArray]) -> None:
         """Receive an input audio frame."""
         ...
 

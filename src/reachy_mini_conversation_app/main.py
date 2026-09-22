@@ -1,6 +1,7 @@
 """Entrypoint for the Reachy Mini conversation app."""
 
 from __future__ import annotations
+import os
 import sys
 import time
 import asyncio
@@ -106,7 +107,15 @@ def main() -> None:
         except Exception as exc:
             logger.error("tool-spaces command failed: %s", exc)
             raise SystemExit(1) from exc
-    run(args)
+    instance_path = None
+    if args.ui:
+        data_home = os.getenv("XDG_DATA_HOME")
+        data_root = Path(data_home).expanduser() if data_home else Path.home() / ".local" / "share"
+        standalone_instance_path = data_root / "reachy_mini_conversation_app"
+        standalone_instance_path.mkdir(parents=True, exist_ok=True)
+        instance_path = str(standalone_instance_path)
+
+    run(args, instance_path=instance_path)
 
 
 def run(
@@ -121,8 +130,11 @@ def run(
     # Putting these dependencies here makes the dashboard faster to load when the conversation app is installed
     from reachy_mini_conversation_app.moves import MovementManager
     from reachy_mini_conversation_app.config import (
+        OPENAI_BACKEND,
         HF_LOCAL_CONNECTION_MODE,
+        config,
         set_instance_path,
+        get_backend_choice,
         get_hf_connection_selection,
         resolve_app_timeout_minutes,
         refresh_runtime_config_from_env,
@@ -154,10 +166,19 @@ def run(
         except Exception as e:
             logger.warning("Failed to load startup settings: %s", e)
 
-    logger.info(
-        "Configured Hugging Face realtime backend, connection mode: %s",
-        get_hf_connection_selection().mode,
-    )
+    backend_provider = get_backend_choice()
+    if backend_provider == OPENAI_BACKEND:
+        logger.info(
+            "Configured backend provider: %s, model: %s",
+            "OpenAI Realtime",
+            config.OPENAI_REALTIME_MODEL,
+        )
+    else:
+        logger.info(
+            "Configured backend provider: %s, connection mode: %s",
+            "Hugging Face",
+            get_hf_connection_selection().mode,
+        )
 
     from reachy_mini_conversation_app.console import LocalStream
     from reachy_mini_conversation_app.tools.core_tools import ToolDependencies
@@ -199,7 +220,17 @@ def run(
     )
 
     def build_handler(startup_voice: Optional[str] = None) -> ConversationHandler:
-        """Build a Hugging Face realtime handler for the current runtime config."""
+        """Build a realtime handler for the current provider configuration."""
+        if get_backend_choice() == OPENAI_BACKEND:
+            from reachy_mini_conversation_app.openai_realtime import OpenAIRealtimeHandler
+
+            logger.info("Using direct OpenAI Realtime handler")
+            return OpenAIRealtimeHandler(
+                deps,
+                instance_path=instance_path,
+                startup_voice=startup_voice,
+            )
+
         from reachy_mini_conversation_app.huggingface_realtime import HuggingFaceRealtimeHandler
 
         hf_connection_selection = get_hf_connection_selection()

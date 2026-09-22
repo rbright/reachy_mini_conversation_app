@@ -83,21 +83,6 @@ def test_config_allows_packaged_default_with_external_profiles(
     assert not (external_profiles / "default").exists()
 
 
-def test_obsolete_backend_env_is_ignored_with_warning(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """Stale multi-backend selectors should be ignored with a warning, not change behaviour."""
-    monkeypatch.setenv("BACKEND_PROVIDER", "openai")
-    monkeypatch.setenv("MODEL_NAME", "gpt-realtime-2")
-
-    with caplog.at_level("WARNING"):
-        config_mod.refresh_runtime_config_from_env()
-
-    assert "BACKEND_PROVIDER" in caplog.text
-    assert "MODEL_NAME" in caplog.text
-    assert "Hugging Face backend only" in caplog.text
-
-
 def test_hf_default_session_url_uses_stable_space_proxy() -> None:
     """The app should not embed the raw, replaceable Inference Endpoint allocator URL."""
     assert config_mod.HF_DEFAULTS.session_url == "https://pollen-robotics-reachy-mini-realtime-url.hf.space/session"
