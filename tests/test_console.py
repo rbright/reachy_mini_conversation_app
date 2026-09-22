@@ -1048,20 +1048,29 @@ async def test_wake_waits_for_rebuilt_handler_before_opening_gate() -> None:
 
 
 @pytest.mark.asyncio
-async def test_detector_fallback_wakes_robot_before_opening_gate() -> None:
-    """Detector failure must restore the robot before conversation audio can flow."""
+async def test_detector_fallback_retries_wake_before_opening_gate() -> None:
+    """A failed fallback wake must retain a path to retry robot restoration."""
     observed_state: list[tuple[bool, bool]] = []
     handler = MagicMock()
     handler.output_queue = asyncio.Queue()
+    detector = MagicMock()
     stream: LocalStream
 
     def wake_robot() -> None:
         observed_state.append((stream._wake_gate_open, stream._wake_gate_event.is_set()))
+        if len(observed_state) == 1:
+            raise RuntimeError("transient wake failure")
 
-    stream = LocalStream(handler, _audio_robot(), wake_word_detector=MagicMock(), on_wake_word=wake_robot)
+    stream = LocalStream(handler, _audio_robot(), wake_word_detector=detector, on_wake_word=wake_robot)
     await stream._disable_wake_word_gate()
 
-    assert observed_state == [(False, False)]
+    assert stream._wake_word_detector is detector
+    assert stream._wake_gate_open is False
+
+    await stream._disable_wake_word_gate()
+
+    assert observed_state == [(False, False), (False, False)]
+    assert stream._wake_word_detector is None
     assert stream._wake_gate_open is True
     assert stream._conversation_ready.is_set()
 

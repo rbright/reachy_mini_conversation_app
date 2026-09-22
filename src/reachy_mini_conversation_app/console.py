@@ -359,7 +359,6 @@ class LocalStream:
 
     async def _disable_wake_word_gate(self) -> None:
         """Restore always-on behavior after a detector failure."""
-        self._wake_word_detector = None
         await self._sleep_transition_complete.wait()
         if self._on_wake_word is not None:
             try:
@@ -367,6 +366,7 @@ class LocalStream:
             except Exception:
                 logger.exception("Failed to restore the active robot state after disabling wake gating")
                 return
+        self._wake_word_detector = None
 
         self._wake_gate_event.set()
         await self._wake_handler_ready.wait()
