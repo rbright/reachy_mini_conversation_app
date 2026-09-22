@@ -523,6 +523,73 @@ def test_media_warmup_overlaps_audio_startup_config(monkeypatch: pytest.MonkeyPa
         asyncio.set_event_loop(asyncio.new_event_loop())
 
 
+def test_detector_fallback_processes_prelaunch_restart(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Detector fallback must not stall a backend restart requested before launch."""
+    handler_started = threading.Event()
+    monkeypatch.setattr("reachy_mini_conversation_app.console.has_hf_realtime_target", lambda: True)
+
+    class FakeHandler:
+        def __init__(self) -> None:
+            self.output_queue: asyncio.Queue[Any] = asyncio.Queue()
+
+        async def start_up(self) -> None:
+            handler_started.set()
+            stream._stop_event.set()
+
+        async def shutdown(self) -> None:
+            return None
+
+    handlers: list[FakeHandler] = []
+
+    def handler_factory(_voice: str | None) -> FakeHandler:
+        handler = FakeHandler()
+        handlers.append(handler)
+        return handler
+
+    detector = MagicMock()
+    detector.load.side_effect = RuntimeError("unsupported detector")
+    media = SimpleNamespace(start_recording=MagicMock(), start_playing=MagicMock(), audio=None, backend=None)
+    stream = LocalStream(
+        handler_factory(None),
+        SimpleNamespace(media=media),
+        handler_factory=handler_factory,
+        wake_word_detector=detector,
+    )
+    stream._restart_requested.set()
+    stream.record_loop = AsyncMock(return_value=None)  # type: ignore[method-assign]
+    stream.play_loop = AsyncMock(return_value=None)  # type: ignore[method-assign]
+
+    async def skip_warmup(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr("reachy_mini_conversation_app.console.asyncio.sleep", skip_warmup)
+    monkeypatch.setattr(
+        "reachy_mini_conversation_app.console.apply_audio_startup_config", MagicMock(return_value=True)
+    )
+
+    launch_errors: list[Exception] = []
+
+    def launch() -> None:
+        try:
+            stream.launch()
+        except Exception as error:
+            launch_errors.append(error)
+
+    launch_thread = threading.Thread(target=launch)
+    launch_thread.start()
+    handler_reached = handler_started.wait(timeout=2.0)
+    if not handler_reached:
+        loop = stream._asyncio_loop
+        assert loop is not None
+        loop.call_soon_threadsafe(stream._wake_handler_ready.set)
+    launch_thread.join(timeout=2.0)
+
+    assert handler_reached
+    assert not launch_thread.is_alive()
+    assert launch_errors == []
+    assert stream.handler is handlers[1]
+
+
 @pytest.mark.asyncio
 async def test_startup_loop_rebuilds_handler_on_restart_request(monkeypatch: pytest.MonkeyPatch) -> None:
     """LocalStream should shut down and rebuild the handler when a restart is requested."""
@@ -531,7 +598,8 @@ async def test_startup_loop_rebuilds_handler_on_restart_request(monkeypatch: pyt
     monkeypatch.setattr(config, "HF_REALTIME_WS_URL", "ws://127.0.0.1:8765/v1/realtime")
 
     class FakeHandler:
-        def __init__(self) -> None:
+        def __init__(self, voice: str | None) -> None:
+            self.voice = voice
             self.connection = None
             self.output_queue = asyncio.Queue()
             self.started = asyncio.Event()
@@ -558,19 +626,19 @@ async def test_startup_loop_rebuilds_handler_on_restart_request(monkeypatch: pyt
     fail_next_build = False
     failed_builds = 0
 
-    def handler_factory(_voice: str | None) -> FakeHandler:
+    def handler_factory(voice: str | None) -> FakeHandler:
         nonlocal fail_next_build, failed_builds
         if fail_next_build:
             fail_next_build = False
             failed_builds += 1
             raise RuntimeError("transient handler build failure")
-        handler = FakeHandler()
+        handler = FakeHandler(voice)
         handlers.append(handler)
         return handler
 
     robot = SimpleNamespace(media=SimpleNamespace(audio=None, backend=None))
     initial_handler = handler_factory(None)
-    stream = LocalStream(initial_handler, robot, handler_factory=handler_factory)
+    stream = LocalStream(initial_handler, robot, handler_factory=handler_factory, startup_voice="Serena")
     stream._backend_retry_delay = 0.01
 
     startup_task = asyncio.create_task(stream._run_handler_startup_loop())
@@ -597,6 +665,7 @@ async def test_startup_loop_rebuilds_handler_on_restart_request(monkeypatch: pyt
         await _wait_until(lambda: len(handlers) == 3 and handlers[2].started.is_set())
 
         assert stream.handler is handlers[2]
+        assert handlers[2].voice == "Serena"
         assert stream._wake_handler_ready.is_set()
         assert failed_builds == 1
     finally:
