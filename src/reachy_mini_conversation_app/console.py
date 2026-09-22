@@ -206,10 +206,14 @@ class LocalStream:
         self._on_sleep_phrase = on_sleep_phrase
         self._wake_gate_open = wake_word_detector is None
         self._wake_gate_event = asyncio.Event()
+        self._conversation_ready = asyncio.Event()
         if self._wake_gate_open:
             self._wake_gate_event.set()
+            self._conversation_ready.set()
         self._sleep_transition_complete = asyncio.Event()
         self._sleep_transition_complete.set()
+        self._wake_handler_ready = asyncio.Event()
+        self._wake_handler_ready.set()
         self._active_backend_name = get_backend_choice()
         self._backend_connection_state = "not_started"
         self._backend_error: str | None = None
@@ -312,7 +316,9 @@ class LocalStream:
         logger.info("Sleep phrase detected")
         self._wake_gate_open = False
         self._wake_gate_event.clear()
+        self._conversation_ready.clear()
         self._sleep_transition_complete.clear()
+        self._wake_handler_ready.clear()
         self._restart_requested.set()
         self.clear_audio_queue()
         asyncio.create_task(self._enter_sleep_mode(), name="wake-word-sleep")
@@ -345,16 +351,20 @@ class LocalStream:
                 logger.exception("Failed to wake Reachy Mini after wake-word detection")
                 return
 
-        self._wake_gate_open = True
         self._wake_gate_event.set()
+        await self._wake_handler_ready.wait()
+        self._wake_gate_open = True
+        self._conversation_ready.set()
         self._emit_phase("ready", "wake_word")
 
     async def _disable_wake_word_gate(self) -> None:
         """Restore always-on behavior after a detector failure."""
         self._wake_word_detector = None
         await self._sleep_transition_complete.wait()
-        self._wake_gate_open = True
         self._wake_gate_event.set()
+        await self._wake_handler_ready.wait()
+        self._wake_gate_open = True
+        self._conversation_ready.set()
         if self._on_wake_word is not None:
             try:
                 await asyncio.to_thread(self._on_wake_word)
@@ -882,6 +892,7 @@ class LocalStream:
                 self._restart_requested.clear()
                 try:
                     self._build_handler_for_current_backend()
+                    self._wake_handler_ready.set()
                 except Exception as e:
                     self._set_backend_connection_state("disconnected", e)
                     logger.warning(
@@ -1121,7 +1132,7 @@ class LocalStream:
         resampler: _StreamingResampler | None = None
         while not self._stop_event.is_set():
             if self._wake_word_detector is not None and not self._wake_gate_open:
-                await self._wake_gate_event.wait()
+                await self._conversation_ready.wait()
                 continue
             handler = self.handler
             try:

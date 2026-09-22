@@ -236,9 +236,9 @@ def run(
         robot.enable_wobbling()
 
     def sleep_from_phrase() -> None:
-        robot.disable_wobbling()
-        movement_manager.stop(reset_to_neutral=False)
-        robot.goto_sleep()
+        sleep_error = app_lifecycle.move_robot_to_sleep(robot, movement_manager, logger)
+        if sleep_error is not None:
+            raise RuntimeError(sleep_error)
 
     deps = ToolDependencies(
         reachy_mini=robot,
@@ -321,20 +321,7 @@ def run(
             go_to_sleep_requested.set()
 
             logger.info("Going to sleep before stopping conversation app.")
-            sleep_error: str | None = None
-
-            try:
-                robot.disable_wobbling()
-            except Exception as e:
-                logger.debug("Error disabling wobbling before sleep: %s", e)
-
-            movement_manager.stop(reset_to_neutral=False)
-
-            try:
-                robot.goto_sleep()
-            except Exception as e:
-                sleep_error = f"{type(e).__name__}: {e}"
-                logger.error("Failed to move Reachy Mini to sleep pose: %s", e)
+            sleep_error = app_lifecycle.move_robot_to_sleep(robot, movement_manager, logger)
 
             stop_current_app_requested = False
             if app_stop_event is None or not app_stop_event.is_set():
