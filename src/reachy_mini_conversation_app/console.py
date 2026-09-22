@@ -880,12 +880,13 @@ class LocalStream:
 
     async def _run_handler_startup_loop(self) -> None:
         """Start the realtime handler and keep settings UI alive after backend failures."""
+        rebuild_required = False
         while not self._stop_event.is_set():
             if self._wake_word_detector is not None and not self._wake_gate_open:
                 self._set_backend_connection_state("sleeping")
                 await self._wake_gate_event.wait()
             selected_backend = get_backend_choice()
-            if selected_backend != self._active_backend_name or self._restart_requested.is_set():
+            if selected_backend != self._active_backend_name or self._restart_requested.is_set() or rebuild_required:
                 await self._shutdown_active_handler()
                 if not self._can_rebuild_handler():
                     self._restart_requested.clear()
@@ -895,9 +896,10 @@ class LocalStream:
                 self._restart_requested.clear()
                 try:
                     self._build_handler_for_current_backend()
+                    rebuild_required = False
                     self._wake_handler_ready.set()
                 except Exception as e:
-                    self._active_backend_name = ""
+                    rebuild_required = True
                     self._set_backend_connection_state("disconnected", e)
                     logger.warning(
                         "%s backend handler failed to initialize: %s. Retrying in %.1f seconds.",
@@ -997,15 +999,15 @@ class LocalStream:
             # Capture loop for cross-thread personality actions
             loop = asyncio.get_running_loop()
             self._asyncio_loop = loop  # type: ignore[assignment]
+            # Connect the backend first so it overlaps detector loading, warmup, and audio config below.
+            handler_task = asyncio.create_task(self._run_handler_startup_loop(), name="realtime-handler")
+            self._tasks = [handler_task]
             if self._wake_word_detector is not None:
                 try:
                     await asyncio.to_thread(self._wake_word_detector.load)
                 except Exception:
                     logger.exception("Wake-word detector failed to load; continuing without wake gating")
                     await self._disable_wake_word_gate()
-            # Connect the backend first so it overlaps the warmup and audio config below.
-            handler_task = asyncio.create_task(self._run_handler_startup_loop(), name="realtime-handler")
-            self._tasks = [handler_task]
             await asyncio.gather(
                 asyncio.sleep(1),  # give the pipelines time to start
                 asyncio.to_thread(apply_audio_startup_config, self._robot, logger=logger),
