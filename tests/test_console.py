@@ -575,6 +575,19 @@ async def test_startup_loop_rebuilds_handler_on_restart_request(monkeypatch: pyt
         assert initial_handler.shutdown_calls >= 1
         assert stream.handler is handlers[1]
         assert stream._backend_connected() is True
+        stream._wake_word_detector = MagicMock()
+        stream._wake_gate_open = False
+        stream._wake_gate_event.clear()
+        stream._wake_handler_ready.clear()
+        stream._restart_requested.set()
+        await stream._shutdown_active_handler()
+        await asyncio.sleep(0)
+
+        stream._wake_gate_event.set()
+        await _wait_until(lambda: len(handlers) == 3 and handlers[2].started.is_set())
+
+        assert stream.handler is handlers[2]
+        assert stream._wake_handler_ready.is_set()
     finally:
         stream._stop_event.set()
         await stream._shutdown_active_handler()

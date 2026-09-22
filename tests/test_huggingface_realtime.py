@@ -192,6 +192,19 @@ async def test_receive_preserves_audio_until_connection_is_ready() -> None:
 
 
 @pytest.mark.asyncio
+async def test_receive_stops_waiting_when_handler_shuts_down() -> None:
+    """A replaced handler must release microphone frames waiting for startup."""
+    handler = _plain_handler()
+    receive_task = asyncio.create_task(handler.receive((16000, np.arange(8, dtype=np.int16))))
+    await asyncio.sleep(0)
+
+    assert not receive_task.done()
+
+    await handler.shutdown()
+    await asyncio.wait_for(receive_task, timeout=0.1)
+
+
+@pytest.mark.asyncio
 async def test_partial_transcription_uses_latest_snapshot(monkeypatch: Any) -> None:
     """Partial transcription snapshots should replace older snapshots for the same item."""
     monkeypatch.setattr(hf_mod, "get_session_instructions", lambda _instance_path=None: "test")

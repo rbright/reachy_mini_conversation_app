@@ -661,6 +661,9 @@ class MovementManager:
                 self.current_robot.stop_head_tracking()
             except Exception as e:
                 logger.warning("Failed to stop head tracking: %s", e)
+        self._head_tracking = False
+        self._track_anchor = None
+        self._is_speaking = False
 
         if not reset_to_neutral:
             return

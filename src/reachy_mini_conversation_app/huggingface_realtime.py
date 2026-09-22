@@ -151,6 +151,7 @@ class OpenAICompatibleRealtimeHandler(ConversationHandler, ABC):
 
         # Internal lifecycle flags
         self._connected_event: asyncio.Event = asyncio.Event()
+        self._shutting_down = False
 
         # Background tool manager
         self.tool_manager = BackgroundToolManager()
@@ -384,6 +385,8 @@ class OpenAICompatibleRealtimeHandler(ConversationHandler, ABC):
 
     async def start_up(self) -> None:
         """Start the handler with minimal retries on unexpected websocket closure."""
+        self._shutting_down = False
+        self._connected_event.clear()
         self.client = await self._build_realtime_client()
 
         max_attempts = 3
@@ -997,7 +1000,11 @@ class OpenAICompatibleRealtimeHandler(ConversationHandler, ABC):
             return
         connection = self.connection
         if connection is None:
+            if self._shutting_down:
+                return
             await self._connected_event.wait()
+            if self._shutting_down:
+                return
             connection = self.connection
             if connection is None:
                 return
@@ -1024,6 +1031,8 @@ class OpenAICompatibleRealtimeHandler(ConversationHandler, ABC):
 
     async def shutdown(self) -> None:
         """Shutdown the handler."""
+        self._shutting_down = True
+        self._connected_event.set()
         # Unblock the response sender worker so it can exit
         self._response_done_event.set()
 

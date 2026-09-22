@@ -87,6 +87,27 @@ def test_head_tracking_follows_speaking() -> None:
     robot.stop_head_tracking.assert_called_once()
 
 
+def test_head_tracking_can_restart_after_movement_manager_restart() -> None:
+    """Restarting the movement manager must allow tracking to be enabled again."""
+    robot = MagicMock()
+    robot.get_current_head_pose.return_value = np.eye(4)
+    robot.get_current_joint_positions.return_value = ([0.0] * 6, [0.0, 0.0])
+    manager = MovementManager(robot)
+
+    manager.start()
+    manager.set_head_tracking(True)
+    assert _wait_for(lambda: robot.start_head_tracking.called)
+    manager.stop(reset_to_neutral=False)
+
+    robot.start_head_tracking.reset_mock()
+    manager.start()
+    try:
+        manager.set_head_tracking(True)
+        assert _wait_for(lambda: robot.start_head_tracking.called)
+    finally:
+        manager.stop(reset_to_neutral=False)
+
+
 def test_speaking_anchor_composes_emotions_and_holds_dances_from_neutral() -> None:
     """While speaking: hold the anchor, compose emotions onto it, play dances from neutral."""
     robot = MagicMock()

@@ -880,7 +880,6 @@ class LocalStream:
             if self._wake_word_detector is not None and not self._wake_gate_open:
                 self._set_backend_connection_state("sleeping")
                 await self._wake_gate_event.wait()
-                continue
             selected_backend = get_backend_choice()
             if selected_backend != self._active_backend_name or self._restart_requested.is_set():
                 await self._shutdown_active_handler()
