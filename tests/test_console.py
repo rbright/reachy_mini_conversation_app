@@ -987,9 +987,39 @@ async def test_wake_waits_for_sleep_transition() -> None:
         assert transitions == []
     finally:
         release_sleep.set()
+    await _wait_until(stream._wake_gate_event.is_set)
+    stream._wake_handler_ready.set()
     await wake_task
 
     assert transitions == ["sleep", "wake"]
+    assert stream._wake_gate_open is True
+
+
+@pytest.mark.asyncio
+async def test_wake_waits_for_rebuilt_handler_before_opening_gate() -> None:
+    """Post-sleep audio cannot target the handler that was shut down."""
+    original_handler = MagicMock()
+    original_handler.output_queue = asyncio.Queue()
+    stream = LocalStream(original_handler, _audio_robot(), wake_word_detector=MagicMock())
+    stream._wake_gate_open = False
+    stream._wake_gate_event.clear()
+    stream._wake_handler_ready.clear()
+
+    wake_task = asyncio.create_task(stream._handle_wake_event(WakeWordEvent(model="hey_emma", score=0.9)))
+    await asyncio.sleep(0)
+    assert stream._conversation_ready.is_set() is False
+
+    assert stream._wake_gate_event.is_set()
+    assert stream._wake_gate_open is False
+
+    rebuilt_handler = MagicMock()
+    rebuilt_handler.output_queue = asyncio.Queue()
+    stream._install_handler(rebuilt_handler)
+    stream._wake_handler_ready.set()
+    await wake_task
+    assert stream._conversation_ready.is_set()
+
+    assert stream.handler is rebuilt_handler
     assert stream._wake_gate_open is True
 
 

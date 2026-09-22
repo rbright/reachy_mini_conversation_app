@@ -124,8 +124,12 @@ class WakeWordDetector:
         return None
 
 
+def _normalize_spoken_phrase(text: str) -> str:
+    return re.sub(r"[^\w']+", " ", text.casefold()).strip()
+
+
 def matches_sleep_phrase(transcript: str, phrases: tuple[str, ...] = DEFAULT_SLEEP_PHRASES) -> bool:
     """Return whether a transcript contains a configured sleep phrase."""
-    normalized = re.sub(r"[^\w']+", " ", transcript.casefold()).strip()
-    padded_transcript = f" {normalized} "
-    return any(f" {' '.join(phrase.casefold().split())} " in padded_transcript for phrase in phrases)
+    padded_transcript = f" {_normalize_spoken_phrase(transcript)} "
+    normalized_phrases = (_normalize_spoken_phrase(phrase) for phrase in phrases)
+    return any(phrase and f" {phrase} " in padded_transcript for phrase in normalized_phrases)

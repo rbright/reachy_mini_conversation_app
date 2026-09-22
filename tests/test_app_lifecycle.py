@@ -60,6 +60,19 @@ def test_wake_up_if_sleeping_skips_non_sleep_head_pose() -> None:
     robot.wake_up.assert_not_called()
 
 
+def test_move_robot_to_sleep_continues_after_wobble_failure() -> None:
+    """A wobble cleanup failure must not prevent the sleep movement."""
+    robot = MagicMock()
+    robot.disable_wobbling.side_effect = RuntimeError("wobble fault")
+    movement_manager = MagicMock()
+
+    result = app_lifecycle.move_robot_to_sleep(robot, movement_manager, MagicMock())
+
+    assert result is None
+    movement_manager.stop.assert_called_once_with(reset_to_neutral=False)
+    robot.goto_sleep.assert_called_once_with()
+
+
 def test_run_go_to_sleep_tool_uses_runtime_callback() -> None:
     """Synchronous lifecycle paths should enter through the go_to_sleep tool."""
     expected = {"status": "sleeping"}

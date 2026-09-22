@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from typing import TYPE_CHECKING
 from pathlib import Path
 
 import numpy as np
@@ -15,6 +16,10 @@ from reachy_mini_conversation_app.daemon_api import DaemonApiError, daemon_reque
 from reachy_mini_conversation_app.profile_store import DEFAULT_PROFILE_NAME, migrate_legacy_profiles
 from reachy_mini_conversation_app.tools.core_tools import ToolDependencies, initialize_tools
 from reachy_mini_conversation_app.tools.go_to_sleep import GoToSleep
+
+
+if TYPE_CHECKING:
+    from reachy_mini_conversation_app.moves import MovementManager
 
 
 _STOP_CURRENT_APP_PATH = "/api/apps/stop-current-app"
@@ -123,6 +128,30 @@ def wake_up_if_sleeping(robot: ReachyMini, logger: logging.Logger) -> bool:
         logger.error("Failed to run wake-up movement: %s", e)
         return False
     return True
+
+
+def move_robot_to_sleep(
+    robot: ReachyMini,
+    movement_manager: "MovementManager",
+    logger: logging.Logger,
+) -> str | None:
+    """Stop active motion and move Reachy Mini to its sleep pose."""
+    try:
+        robot.disable_wobbling()
+    except Exception as e:
+        logger.warning("Failed to disable wobbling before sleep: %s", e)
+
+    try:
+        movement_manager.stop(reset_to_neutral=False)
+    except Exception as e:
+        logger.warning("Failed to stop movement manager before sleep: %s", e)
+
+    try:
+        robot.goto_sleep()
+    except Exception as e:
+        logger.error("Failed to move Reachy Mini to sleep pose: %s", e)
+        return f"{type(e).__name__}: {e}"
+    return None
 
 
 def run_go_to_sleep_tool(deps: ToolDependencies, logger: logging.Logger) -> dict[str, object]:

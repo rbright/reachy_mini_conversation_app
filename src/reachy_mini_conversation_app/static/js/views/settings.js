@@ -346,6 +346,7 @@ function buildStatusSection() {
         connecting: "Connecting…",
         disconnected: "Disconnected",
         not_started: "Not started",
+        sleeping: "Sleeping — waiting for wake word",
         restart_required: "Restart required",
         waiting_for_config: "Waiting for configuration",
       };
@@ -353,7 +354,11 @@ function buildStatusSection() {
         statusRow(
           "Backend",
           backendLabels[backendState] || "Unavailable",
-          backendState === "connected" ? "ok" : backendState === "not_started" ? undefined : "warn"
+          backendState === "connected" || backendState === "sleeping"
+            ? "ok"
+            : backendState === "not_started"
+              ? undefined
+              : "warn"
         )
       );
       if (payload.backend_error) list.appendChild(statusRow("Backend error", payload.backend_error, "warn"));
