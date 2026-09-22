@@ -108,6 +108,25 @@ def test_head_tracking_can_restart_after_movement_manager_restart() -> None:
         manager.stop(reset_to_neutral=False)
 
 
+def test_reset_pose_to_neutral_clears_cached_motion() -> None:
+    """An external wake movement must replace the manager's cached pose."""
+    manager = MovementManager(MagicMock())
+    stale_pose = (create_head_pose(10, 5, -8, 2, 3, 4, degrees=True), (0.4, -0.3), 0.2)
+    manager.state.last_primary_pose = clone_full_body_pose(stale_pose)
+    manager._last_commanded_pose = clone_full_body_pose(stale_pose)
+
+    manager.reset_pose_to_neutral()
+
+    expected_head = create_head_pose(0, 0, 0, 0, 0, 0, degrees=True)
+    assert manager.state.last_primary_pose is not None
+    np.testing.assert_allclose(manager.state.last_primary_pose[0], expected_head)
+    assert manager.state.last_primary_pose[1:] == ((0.0, 0.0), 0.0)
+    status_pose = manager.get_status()["last_commanded_pose"]
+    np.testing.assert_allclose(status_pose["head"], expected_head)
+    assert status_pose["antennas"] == (0.0, 0.0)
+    assert status_pose["body_yaw"] == 0.0
+
+
 def test_speaking_anchor_composes_emotions_and_holds_dances_from_neutral() -> None:
     """While speaking: hold the anchor, compose emotions onto it, play dances from neutral."""
     robot = MagicMock()

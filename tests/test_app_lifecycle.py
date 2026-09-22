@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, call
 
 import numpy as np
+import pytest
 
 from reachy_mini.reachy_mini import SLEEP_HEAD_POSE
 from reachy_mini_conversation_app import daemon_api, app_lifecycle
@@ -102,22 +103,48 @@ def test_request_stop_current_app_returns_false_on_urlerror(monkeypatch) -> None
 
 
 def test_wake_up_if_sleeping_handles_pose_read_failure() -> None:
-    """A robot that cannot report its pose skips the wake-up movement."""
+    """A robot that cannot report its pose reports an unknown wake state."""
     robot = MagicMock()
     robot.get_current_head_pose.side_effect = RuntimeError("no telemetry")
 
-    assert not app_lifecycle.wake_up_if_sleeping(robot, MagicMock())
+    assert app_lifecycle.wake_up_if_sleeping(robot, MagicMock()) is None
     robot.wake_up.assert_not_called()
 
 
 def test_wake_up_if_sleeping_reports_wake_up_failure() -> None:
-    """A wake-up movement that fails is reported without raising."""
+    """A failed wake-up movement reports an unknown wake state."""
     robot = MagicMock()
     robot.get_current_head_pose.return_value = SLEEP_HEAD_POSE.copy()
     robot.wake_up.side_effect = RuntimeError("motor fault")
 
-    assert not app_lifecycle.wake_up_if_sleeping(robot, MagicMock())
+    assert app_lifecycle.wake_up_if_sleeping(robot, MagicMock()) is None
     robot.wake_up.assert_called_once_with()
+
+
+def test_wake_robot_for_conversation_resets_pose_after_sleep() -> None:
+    """A completed wake movement must reset stale movement state before restart."""
+    robot = MagicMock()
+    robot.get_current_head_pose.return_value = SLEEP_HEAD_POSE.copy()
+    movement_manager = MagicMock()
+
+    app_lifecycle.wake_robot_for_conversation(robot, movement_manager, MagicMock())
+
+    assert movement_manager.method_calls == [call.reset_pose_to_neutral(), call.start()]
+    robot.enable_wobbling.assert_called_once_with()
+
+
+def test_wake_robot_for_conversation_stays_closed_after_wake_failure() -> None:
+    """Conversation setup must stop when the physical wake movement fails."""
+    robot = MagicMock()
+    robot.get_current_head_pose.return_value = SLEEP_HEAD_POSE.copy()
+    robot.wake_up.side_effect = RuntimeError("motor fault")
+    movement_manager = MagicMock()
+
+    with pytest.raises(RuntimeError, match="Could not confirm"):
+        app_lifecycle.wake_robot_for_conversation(robot, movement_manager, MagicMock())
+
+    movement_manager.start.assert_not_called()
+    robot.enable_wobbling.assert_not_called()
 
 
 def test_wake_up_if_sleeping_ignores_malformed_pose() -> None:

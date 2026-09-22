@@ -227,13 +227,9 @@ def run(
             model_path=wake_word_model_path,
             threshold=wake_word_settings.threshold,
         )
-    else:
-        app_lifecycle.wake_up_if_sleeping(robot, logger)
 
     def wake_from_wake_word() -> None:
-        app_lifecycle.wake_up_if_sleeping(robot, logger)
-        movement_manager.start()
-        robot.enable_wobbling()
+        app_lifecycle.wake_robot_for_conversation(robot, movement_manager, logger)
 
     def sleep_from_phrase() -> None:
         sleep_error = app_lifecycle.move_robot_to_sleep(robot, movement_manager, logger)
@@ -369,6 +365,7 @@ def run(
 
     # Each async service gets its own thread or event loop.
     if wake_word_detector is None:
+        app_lifecycle.wake_up_if_sleeping(robot, logger)
         movement_manager.start()
         robot.enable_wobbling()
     else:

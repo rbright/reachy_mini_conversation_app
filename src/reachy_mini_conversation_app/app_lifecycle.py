@@ -109,13 +109,13 @@ def _is_sleep_head_pose(head_pose: npt.ArrayLike) -> bool:
     )
 
 
-def wake_up_if_sleeping(robot: ReachyMini, logger: logging.Logger) -> bool:
-    """Run the SDK wake-up movement when Reachy starts from the sleep pose."""
+def wake_up_if_sleeping(robot: ReachyMini, logger: logging.Logger) -> bool | None:
+    """Wake a sleeping robot, return false if awake, or none on failure."""
     try:
         head_pose = robot.get_current_head_pose()
     except Exception as e:
         logger.warning("Could not read robot pose before startup wake-up check: %s", e)
-        return False
+        return None
 
     if not _is_sleep_head_pose(head_pose):
         return False
@@ -126,8 +126,24 @@ def wake_up_if_sleeping(robot: ReachyMini, logger: logging.Logger) -> bool:
         robot.wake_up()
     except Exception as e:
         logger.error("Failed to run wake-up movement: %s", e)
-        return False
+        return None
     return True
+
+
+def wake_robot_for_conversation(
+    robot: ReachyMini,
+    movement_manager: "MovementManager",
+    logger: logging.Logger,
+) -> None:
+    """Prepare the robot and movement manager for an active conversation."""
+    woke_from_sleep = wake_up_if_sleeping(robot, logger)
+    if woke_from_sleep is None:
+        raise RuntimeError("Could not confirm that Reachy Mini is awake")
+    if woke_from_sleep:
+        movement_manager.reset_pose_to_neutral()
+
+    movement_manager.start()
+    robot.enable_wobbling()
 
 
 def move_robot_to_sleep(

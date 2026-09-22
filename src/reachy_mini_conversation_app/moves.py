@@ -632,6 +632,14 @@ class MovementManager:
         self._thread.start()
         logger.debug("Move worker started")
 
+    def reset_pose_to_neutral(self) -> None:
+        """Reset cached motion state after an external wake-up movement."""
+        neutral_pose: FullBodyPose = (create_head_pose(0, 0, 0, 0, 0, 0, degrees=True), (0.0, 0.0), 0.0)
+        with self._status_lock:
+            self.state.last_primary_pose = clone_full_body_pose(neutral_pose)
+            self._last_commanded_pose = clone_full_body_pose(neutral_pose)
+            self._listening_antennas = neutral_pose[1]
+
     def stop(self, reset_to_neutral: bool = True) -> None:
         """Request the worker thread to stop and wait for it to exit.
 

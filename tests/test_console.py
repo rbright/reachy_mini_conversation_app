@@ -203,6 +203,7 @@ def test_backend_config_requests_in_process_restart_with_handler_factory(
         settings_app=app,
         instance_path=str(tmp_path),
         handler_factory=lambda _voice: handler,
+        wake_word_detector=MagicMock(),
     )
     stream._init_settings_ui_if_needed()
 
@@ -214,6 +215,7 @@ def test_backend_config_requests_in_process_restart_with_handler_factory(
     assert data["can_proceed"] is True
     assert data["backend_connection_state"] == "connecting"
     assert stream._restart_requested.is_set()
+    assert not stream._wake_handler_ready.is_set()
 
 
 def test_backend_config_shutdown_runs_on_stream_loop(
@@ -1043,6 +1045,25 @@ async def test_wake_waits_for_rebuilt_handler_before_opening_gate() -> None:
 
     assert stream.handler is rebuilt_handler
     assert stream._wake_gate_open is True
+
+
+@pytest.mark.asyncio
+async def test_detector_fallback_wakes_robot_before_opening_gate() -> None:
+    """Detector failure must restore the robot before conversation audio can flow."""
+    observed_state: list[tuple[bool, bool]] = []
+    handler = MagicMock()
+    handler.output_queue = asyncio.Queue()
+    stream: LocalStream
+
+    def wake_robot() -> None:
+        observed_state.append((stream._wake_gate_open, stream._wake_gate_event.is_set()))
+
+    stream = LocalStream(handler, _audio_robot(), wake_word_detector=MagicMock(), on_wake_word=wake_robot)
+    await stream._disable_wake_word_gate()
+
+    assert observed_state == [(False, False)]
+    assert stream._wake_gate_open is True
+    assert stream._conversation_ready.is_set()
 
 
 @pytest.mark.asyncio

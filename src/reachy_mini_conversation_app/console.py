@@ -361,15 +361,17 @@ class LocalStream:
         """Restore always-on behavior after a detector failure."""
         self._wake_word_detector = None
         await self._sleep_transition_complete.wait()
-        self._wake_gate_event.set()
-        await self._wake_handler_ready.wait()
-        self._wake_gate_open = True
-        self._conversation_ready.set()
         if self._on_wake_word is not None:
             try:
                 await asyncio.to_thread(self._on_wake_word)
             except Exception:
                 logger.exception("Failed to restore the active robot state after disabling wake gating")
+                return
+
+        self._wake_gate_event.set()
+        await self._wake_handler_ready.wait()
+        self._wake_gate_open = True
+        self._conversation_ready.set()
 
     def seconds_since_activity(self) -> float:
         """Seconds since the live handler last saw conversation activity."""
@@ -466,6 +468,8 @@ class LocalStream:
 
         logger.info("Backend restart requested: %s", reason)
         self._set_backend_connection_state("connecting")
+        if self._wake_word_detector is not None and not self._wake_gate_open:
+            self._wake_handler_ready.clear()
         self._restart_requested.set()
         await self._shutdown_active_handler()
 
