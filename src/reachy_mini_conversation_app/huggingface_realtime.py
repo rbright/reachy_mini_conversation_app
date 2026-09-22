@@ -847,6 +847,15 @@ class OpenAICompatibleRealtimeHandler(ConversationHandler, ABC):
                         if not transcript:
                             logger.debug("Ignoring empty user transcript")
                             continue
+                        if self._handle_transcript_command(transcript):
+                            try:
+                                await self.connection.response.cancel()
+                            except Exception as e:
+                                logger.debug("No active response to cancel for local transcript command: %s", e)
+                            self.deps.movement_manager.set_listening(False)
+                            self.deps.movement_manager.set_speaking(False)
+                            self._response_done_event.set()
+                            continue
 
                         self._turn_user_done_at = time.perf_counter()
                         self._turn_response_created_at = None

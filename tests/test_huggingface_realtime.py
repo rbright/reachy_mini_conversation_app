@@ -585,6 +585,23 @@ async def test_run_session_emits_completed_transcript(monkeypatch: Any) -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_session_consumes_local_transcript_command(monkeypatch: Any) -> None:
+    """A local sleep command is not emitted to the realtime conversation."""
+    handler = _session_handler(
+        monkeypatch,
+        (_FakeEvent("conversation.item.input_audio_transcription.completed", transcript="Goodbye Emma"),),
+    )
+    command_handler = MagicMock(return_value=True)
+    handler.set_transcript_command_handler(command_handler)
+
+    await handler._run_realtime_session()
+
+    command_handler.assert_called_once_with("Goodbye Emma")
+    assert {"role": "user", "content": "Goodbye Emma"} not in _messages(_drain(handler))
+    assert handler._response_done_event.is_set()
+
+
+@pytest.mark.asyncio
 async def test_run_session_skips_empty_completed_transcript(monkeypatch: Any) -> None:
     """An empty completed transcript is ignored but still stops listening."""
     handler = _session_handler(

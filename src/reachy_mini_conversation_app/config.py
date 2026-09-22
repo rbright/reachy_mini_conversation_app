@@ -173,6 +173,54 @@ def _env_flag(name: str, default: bool = False) -> bool:
 
 APP_TIMEOUT_MINUTES_ENV = "REACHY_MINI_APP_TIMEOUT_MINUTES"
 DEFAULT_APP_TIMEOUT_MINUTES = 1440.0
+WAKE_WORD_ENABLED_ENV = "REACHY_MINI_WAKE_WORD_ENABLED"
+WAKE_WORD_MODEL_ENV = "REACHY_MINI_WAKE_WORD_MODEL"
+WAKE_WORD_THRESHOLD_ENV = "REACHY_MINI_WAKE_WORD_THRESHOLD"
+SLEEP_PHRASES_ENV = "REACHY_MINI_SLEEP_PHRASES"
+DEFAULT_WAKE_WORD_THRESHOLD = 0.5
+
+
+@dataclass(frozen=True)
+class WakeWordSettings:
+    """Startup settings for local wake and sleep phrase handling."""
+
+    enabled: bool
+    model_path: str | None
+    threshold: float
+    sleep_phrases: tuple[str, ...]
+
+
+def resolve_wake_word_settings(default_sleep_phrases: tuple[str, ...]) -> WakeWordSettings:
+    """Read wake-word settings from the environment."""
+    raw_threshold = os.getenv(WAKE_WORD_THRESHOLD_ENV, "").strip()
+    model_path = os.getenv(WAKE_WORD_MODEL_ENV, "").strip() or None
+    try:
+        threshold = float(raw_threshold) if raw_threshold else DEFAULT_WAKE_WORD_THRESHOLD
+    except ValueError:
+        logger.warning(
+            "Invalid %s=%r; using %.2f.",
+            WAKE_WORD_THRESHOLD_ENV,
+            raw_threshold,
+            DEFAULT_WAKE_WORD_THRESHOLD,
+        )
+        threshold = DEFAULT_WAKE_WORD_THRESHOLD
+
+    if not 0.0 < threshold <= 1.0:
+        logger.warning(
+            "Invalid %s=%r; using %.2f.",
+            WAKE_WORD_THRESHOLD_ENV,
+            raw_threshold,
+            DEFAULT_WAKE_WORD_THRESHOLD,
+        )
+        threshold = DEFAULT_WAKE_WORD_THRESHOLD
+
+    sleep_phrases = tuple(phrase.strip() for phrase in os.getenv(SLEEP_PHRASES_ENV, "").split(",") if phrase.strip())
+    return WakeWordSettings(
+        enabled=_env_flag(WAKE_WORD_ENABLED_ENV, default=True),
+        model_path=model_path,
+        threshold=threshold,
+        sleep_phrases=sleep_phrases or default_sleep_phrases,
+    )
 
 
 def resolve_app_timeout_minutes() -> float | None:
