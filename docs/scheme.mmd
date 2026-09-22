@@ -10,7 +10,7 @@ flowchart TB
     UI@{ label: "<span style='font-size:16px;font-weight:bold;'>UI Layer</span><br><span style='font-size:13px;color:#0277bd;'>Web UI / Console</span>" }
 
     UI -- audio stream --> 
-    Backend@{ label: "<span style='font-size:16px;font-weight:bold;'>Realtime Backend</span><br><span style='font-size:12px; color:#7b1fa2;'>Audio + Tool Calls + Vision</span>" }
+    Backend@{ label: "<span style='font-size:16px;font-weight:bold;'>Realtime Provider</span><br><span style='font-size:12px; color:#7b1fa2;'>Hugging Face / OpenAI<br/>Audio + Tool Calls + Vision</span>" }
 
     Backend -- audio stream -->
     Motion@{ label: "<span style='font-size:16px;font-weight:bold;'>Motion Control</span><br><span style='font-size:13px;color:#f57f17;'>Audio Sync</span>" }

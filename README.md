@@ -33,7 +33,7 @@ Conversational app for the Reachy Mini robot combining realtime voice, vision, p
 
 ## Overview
 
-- Low-latency audio conversation through the Hugging Face realtime backend, using the built-in server or a local endpoint.
+- Low-latency audio conversation through either the supported Hugging Face backend or the direct OpenAI Realtime API.
 - Vision is handled by the realtime backend when the `camera` tool is used.
 - Layered motion system queues primary moves (dances, emotions, goto poses, breathing) while blending speech-reactive wobble.
 - Async tools integrate motion, camera capture, and MCP Tool Spaces. The optional web UI (`--ui`) manages conversations, personalities, tools, and settings.
@@ -96,17 +96,32 @@ pip install -e .[dev]                   # Development tools
 
 ## Configuration
 
-The default setup uses the Hugging Face backend and does not require an API key.
+The default setup uses the Hugging Face backend and does not require an API key. Select OpenAI Realtime in the web UI to use direct speech-to-speech sessions with your own OpenAI API key.
 
-Copy `.env.example` to `.env` when you want to point Hugging Face at your own local endpoint.
+Copy `.env.example` to `.env` to configure a provider outside the web UI.
 
 | Variable | Description |
 |----------|-------------|
+| `BACKEND_PROVIDER` | Realtime provider: `huggingface` (default) or `openai`. The Settings UI persists this choice. |
+| `OPENAI_API_KEY` | API key for direct OpenAI Realtime sessions. The Settings UI can save or replace it and never returns it to the browser. |
+| `OPENAI_REALTIME_MODEL` | Direct OpenAI Realtime model. Defaults to `gpt-realtime-2.1`; supported values are shown in the Settings UI. |
 | `REALTIME_TRANSCRIPTION_LANGUAGE` | Optional input transcription language for the realtime backend. Defaults to `en`; set to a backend-supported code such as `zh` for Chinese. |
 | `HF_REALTIME_CONNECTION_MODE` | Hugging Face connection selector: `deployed` uses the built-in Hugging Face server; `local` uses `HF_REALTIME_WS_URL`. Defaults to `deployed`. |
 | `HF_REALTIME_WS_URL` | Direct websocket endpoint for your own Hugging Face backend. Accepts either a base URL like `ws://127.0.0.1:8765/v1` or the full websocket URL `ws://127.0.0.1:8765/v1/realtime`. Used when `HF_REALTIME_CONNECTION_MODE=local`. |
 | `HF_TOKEN` | Optional token for Hugging Face access. Local endpoints receive only this explicitly configured token. |
 | `REACHY_MINI_APP_TIMEOUT_MINUTES` | Minutes of inactivity before Reachy goes to sleep and the app stops. Defaults to `1440` (one day); set to `0` to disable. |
+
+### OpenAI Realtime
+
+OpenAI uses a direct 24 kHz Realtime WebSocket audio path. It does not use the Hugging Face speech-to-speech service. Configure it in Settings, or set:
+
+```env
+BACKEND_PROVIDER=openai
+OPENAI_API_KEY=your-api-key
+OPENAI_REALTIME_MODEL=gpt-realtime-2.1
+```
+
+The API key is stored only in the instance `.env`. Enter a new key in Settings to replace it. The UI reports only whether a key exists.
 
 ### Hugging Face Connection Modes
 
@@ -147,7 +162,7 @@ HF_REALTIME_CONNECTION_MODE=local
 HF_REALTIME_WS_URL=ws://127.0.0.1:8765/v1/realtime
 ```
 
-In the web UI's Settings view, the Connection section lets you choose either the built-in server or a local `host:port` target. The UI writes `HF_REALTIME_CONNECTION_MODE` for you, and the local path writes `HF_REALTIME_WS_URL` with a default of `localhost:8765`.
+In the web UI's Settings view, select Hugging Face or OpenAI Realtime. Hugging Face keeps its hosted/local controls. OpenAI exposes its API key, validated model catalog, and native voice catalog. Voice choices update for the selected provider.
 
 ## Running the app
 
