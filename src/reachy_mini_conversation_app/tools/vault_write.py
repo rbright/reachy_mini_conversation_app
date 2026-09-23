@@ -16,9 +16,11 @@ class VaultWrite(Tool):
 
     name = "vault_write"
     description = (
-        "Create a note in the Obsidian vault, in a folder this personality may write. The note type and "
+        "Create a note in the Obsidian vault, or update a draft artifact or a record that this agent owns, in a "
+        "folder this personality may write. An update replaces the whole body and merges the given properties; "
+        "to revise your own draft, write to its path again instead of creating a new note. The note type and "
         "properties must follow the vault schema. The tool sets created, author, and run. It refuses dated notes "
-        "and logs that exist, approved notes, and anything outside the allowed folders."
+        "and logs that exist, approved notes, reference notes, and anything outside the allowed folders."
     )
     parameters_schema = {
         "type": "object",
