@@ -108,7 +108,7 @@ export function buildProfileVaultAccessSection({ signal } = {}) {
       access.session_log = {
         folder: logFolderInput.value.trim(),
         type: logTypeInput.value.trim(),
-        properties: parseProperties(logPropertiesInput.value),
+        properties: parseProperties(logPropertiesInput.value, "Session log"),
       };
     }
     if (memoryFolderInput.value.trim() || memoryTypeInput.value.trim()) {
@@ -116,7 +116,7 @@ export function buildProfileVaultAccessSection({ signal } = {}) {
         folder: memoryFolderInput.value.trim(),
         type: memoryTypeInput.value.trim(),
         date_weekday: Number(memoryWeekdaySelect.value),
-        properties: parseProperties(memoryPropertiesInput.value),
+        properties: parseProperties(memoryPropertiesInput.value, "Weekly memory"),
       };
     }
     return access;
@@ -188,11 +188,17 @@ function formatProperties(properties) {
     .join("\n");
 }
 
-function parseProperties(text) {
+/** Parse `key: value` lines; throw on a line without a key so that the save stops with a message. */
+function parseProperties(text, label) {
   const properties = {};
+  const invalid = [];
   for (const line of lines(text)) {
     const separator = line.indexOf(":");
     if (separator > 0) properties[line.slice(0, separator).trim()] = line.slice(separator + 1).trim();
+    else invalid.push(line);
+  }
+  if (invalid.length) {
+    throw new Error(`${label} properties need one "key: value" per line. Fix: ${invalid.join(" | ")}`);
   }
   return properties;
 }
