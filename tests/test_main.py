@@ -73,19 +73,24 @@ def test_standalone_ui_uses_stable_writable_instance_path(tmp_path, monkeypatch)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX signals")
-def test_sigterm_takes_the_orderly_sigint_shutdown_path() -> None:
-    """SIGTERM cancels the running event loop like SIGINT, so shutdown `finally` blocks still run."""
+@pytest.mark.parametrize("inherited_sigint", ["default_int_handler", "SIG_IGN"])
+def test_sigterm_takes_the_orderly_sigint_shutdown_path(inherited_sigint: str) -> None:
+    """SIGTERM ends a running event loop like SIGINT, also when SIGINT is ignored, so `finally` blocks run."""
     script = textwrap.dedent(
-        """
-        import os, signal, asyncio
+        f"""
+        import os, signal, asyncio, threading
         from reachy_mini_conversation_app.main import _handle_sigterm_as_sigint
 
+        # A background job from a non-interactive shell inherits SIGINT as ignored.
+        signal.signal(signal.SIGINT, signal.{inherited_sigint})
+
         async def runner():
+            # Sent while the loop waits, like a service manager stop.
+            threading.Timer(0.2, os.kill, (os.getpid(), signal.SIGTERM)).start()
             try:
-                os.kill(os.getpid(), signal.SIGTERM)
-                await asyncio.sleep(10)
+                await asyncio.sleep(5)
             finally:
-                print("session flushed", flush=True)
+                await asyncio.to_thread(print, "session flushed", flush=True)
 
         _handle_sigterm_as_sigint()
         try:

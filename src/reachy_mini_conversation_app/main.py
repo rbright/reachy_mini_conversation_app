@@ -97,8 +97,9 @@ def _start_inactivity_timeout_thread(
 
 
 def _handle_sigterm_as_sigint() -> None:
-    """Route SIGTERM to the SIGINT handler, so that a service stop takes the orderly shutdown path."""
-    signal.signal(signal.SIGTERM, lambda _signum, _frame: signal.raise_signal(signal.SIGINT))
+    """Raise KeyboardInterrupt on SIGTERM, so that a service stop takes the orderly SIGINT shutdown path."""
+    # Raised directly, not re-sent as SIGINT: a background launch can inherit SIGINT as ignored.
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
 
 
 def main() -> None:
