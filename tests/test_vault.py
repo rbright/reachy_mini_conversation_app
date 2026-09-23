@@ -148,16 +148,23 @@ def test_write_validates_against_schema(
     assert not (fixture_vault / path).exists()
 
 
-def test_write_refuses_credential_content(fixture_vault: Path) -> None:
-    """Credential-like text is refused and the message does not repeat it."""
-    with pytest.raises(RefusedError, match="credential pattern \\(api-key\\)") as error:
-        _write(
-            fixture_vault,
-            "Emma/Sessions/a.md",
-            {"type": "emma-session", "date": "2026-09-23"},
-            "key sk-abcdefghijklmnopqrstuvwxyz\n",
-        )
-    assert "sk-abc" not in str(error.value)
+@pytest.mark.parametrize(
+    ("body", "pattern", "secret"),
+    [
+        ("key sk-abcdefghijklmnopqrstuvwxyz\n", "api-key", "sk-abc"),
+        # Built at runtime, so that secret scanners do not flag the fake values in this file.
+        ("Use hf_" + "AbCd" * 9 + " here\n", "huggingface-token", "hf_AbC"),
+        ("HF_TOKEN=Zx81kQ2mP0aa\n", "secret-assignment", "Zx81kQ2m"),
+        ("AWS_SECRET_ACCESS_KEY = '" + "wJalr/Xut" * 4 + "'\n", "secret-assignment", "wJalr"),
+        ("github token: Zx81kQ2mP0aa\n", "secret-assignment", "Zx81kQ2m"),
+    ],
+)
+def test_write_refuses_credential_content(fixture_vault: Path, body: str, pattern: str, secret: str) -> None:
+    """Credential-like text is refused and the message names the pattern, never the text."""
+    with pytest.raises(RefusedError, match=f"credential pattern \\({pattern}\\)") as error:
+        _write(fixture_vault, "Emma/Sessions/a.md", {"type": "emma-session", "date": "2026-09-23"}, body)
+    assert secret not in str(error.value)
+    assert not (fixture_vault / "Emma/Sessions/a.md").exists()
 
 
 def test_read_and_query_respect_both_allowlists(fixture_vault: Path) -> None:

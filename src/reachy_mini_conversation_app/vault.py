@@ -63,11 +63,14 @@ _CREDENTIALS = (
     ("slack-token", re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}")),
     ("api-key", re.compile(r"\bsk-(?:ant-|proj-)?[A-Za-z0-9_-]{20,}")),
     ("google-api-key", re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b")),
+    ("huggingface-token", re.compile(r"\bhf_[A-Za-z0-9]{30,}\b")),
     ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")),
     (
         "secret-assignment",
+        # A key name with any prefix (`HF_TOKEN`, `AWS_SECRET_ACCESS_KEY`), then a value of 8 or more characters.
         re.compile(
-            r"(?i)\b(?:password|passwd|api[_-]?key|secret[_-]?key|access[_-]?token)\b\s*[:=]\s*[\"']?[^\s\"'\[]{8,}",
+            r"(?i)\b[a-z0-9_]*(?:password|passwd|api[_-]?key|secret(?:[_-]?access)?[_-]?key|secret|token)\b"
+            r"\s*[:=]\s*[\"']?[^\s\"'\[]{8,}",
         ),
     ),
 )
