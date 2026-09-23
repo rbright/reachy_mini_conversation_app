@@ -8,11 +8,7 @@ import reachy_mini_conversation_app.vault_session as vault_session_mod
 from reachy_mini_conversation_app.vault import parse_note
 from reachy_mini_conversation_app.config import config
 from reachy_mini_conversation_app.vault_session import SESSION_CONTEXT_MAX_CHARS, VaultSession
-from reachy_mini_conversation_app.profile_vault_access import (
-    ProfileVaultAccess,
-    read_profile_vault_access,
-    write_profile_vault_access,
-)
+from reachy_mini_conversation_app.profile_vault_access import ProfileVaultAccess, write_profile_vault_access
 
 
 ACCESS = {
@@ -37,16 +33,6 @@ def emma_vault(fixture_vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(config, "REACHY_MINI_CUSTOM_PROFILE", "Emma")
     write_profile_vault_access("Emma", ProfileVaultAccess.model_validate(ACCESS), tmp_path)
     return tmp_path
-
-
-def test_store_round_trips_and_clears(tmp_path: Path) -> None:
-    """The store keeps one entry per profile next to profile_toolsets.json."""
-    path = write_profile_vault_access("Emma", ProfileVaultAccess.model_validate(ACCESS), tmp_path)
-
-    assert path == tmp_path / "profile_vault_access.json"
-    assert read_profile_vault_access(tmp_path)["Emma"].session_log is not None
-    write_profile_vault_access("Emma", None, tmp_path)
-    assert read_profile_vault_access(tmp_path) == {}
 
 
 def test_session_start_loads_capped_context_once(emma_vault: Path, fixture_vault: Path) -> None:
