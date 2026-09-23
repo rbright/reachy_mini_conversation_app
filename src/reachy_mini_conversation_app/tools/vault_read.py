@@ -37,7 +37,7 @@ class VaultRead(Tool):
         try:
             active = await asyncio.to_thread(active_vault, deps.instance_path)
             note = await asyncio.to_thread(
-                read_note, active.root, path.strip(), agent=active.access.agent, folders=active.access.read
+                read_note, active.vault, path.strip(), agent=active.access.agent, folders=active.access.read
             )
         except (VaultError, OSError) as exc:
             logger.warning("vault_read failed for %s: %s", path, exc)

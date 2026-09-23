@@ -8,11 +8,12 @@ from datetime import date, datetime, timedelta
 from dataclasses import field, dataclass
 
 from reachy_mini_conversation_app.vault import (
+    Vault,
     VaultError,
     note_path,
     read_note,
+    open_vault,
     write_note,
-    load_schema,
     query_notes,
     covers_folder,
     fill_placeholders,
@@ -48,9 +49,9 @@ _NOTES_PREAMBLE = (
 
 @dataclass(frozen=True)
 class ActiveVault:
-    """The synced vault and the active profile's access to it."""
+    """The synced vault with its schema, and one profile's access to it."""
 
-    root: Path
+    vault: Vault
     profile: str
     access: ProfileVaultAccess
 
@@ -67,7 +68,8 @@ def active_vault(instance_path: str | Path | None, profile: str | None = None) -
         raise VaultError(str(exc)) from exc
     if access is None:
         raise VaultError(f"vault access is not configured for personality `{profile}`")
-    return ActiveVault(root=root, profile=profile, access=access)
+    # One schema read per operation: a session start, a session end, or a tool call.
+    return ActiveVault(vault=open_vault(root), profile=profile, access=access)
 
 
 def _calendar_values(day: date) -> dict[str, str]:
@@ -87,7 +89,7 @@ def _agent_rules(active: ActiveVault) -> str:
     agent = active.access.agent
     try:
         text = read_note(
-            active.root, AGENTS_FILENAME, agent=agent, folders=active.access.read, body_max_chars=AGENTS_MAX_CHARS
+            active.vault, AGENTS_FILENAME, agent=agent, folders=active.access.read, body_max_chars=AGENTS_MAX_CHARS
         ).body
     except VaultError as exc:
         logger.info("No vault AGENTS.md rules for this session: %s", exc)
@@ -105,38 +107,31 @@ def _agent_rules(active: ActiveVault) -> str:
 def build_session_context(active: ActiveVault) -> str:
     """Return the capped vault rules, then the `session_context` notes as delimited untrusted data."""
     access = active.access
-    sections: list[str] = []
-    try:
-        schema = load_schema(active.root)
-    except VaultError as exc:
-        logger.warning("Vault schema unavailable for session context: %s", exc)
-    else:
-        writable = [
-            f"`{name}` ({rule.note_class}; required: {', '.join(rule.required) or 'none'})"
-            for name, rule in schema.types.items()
-            if rule.note_class != "reference" and any(covers_folder(access.write, folder) for folder in rule.folders)
-        ]
-        summary = [
-            f"Vault `{schema.vault}`. You write as `agent/{access.agent}` with the vault tools.",
-            f"Read folders: {', '.join(folder or '.' for folder in access.read) or 'none'}.",
-            f"Write folders: {', '.join(folder or '.' for folder in access.write) or 'none'}.",
-            f"Note types you may write: {', '.join(writable) or 'none'}.",
-        ]
-        sections.append("### Vault rules\n\n" + "\n".join(summary))
+    schema = active.vault.schema
+    writable = [
+        f"`{name}` ({rule.note_class}; required: {', '.join(rule.required) or 'none'})"
+        for name, rule in schema.types.items()
+        if rule.note_class != "reference" and any(covers_folder(access.write, folder) for folder in rule.folders)
+    ]
+    summary = [
+        f"Vault `{schema.vault}`. You write as `agent/{access.agent}` with the vault tools.",
+        f"Read folders: {', '.join(folder or '.' for folder in access.read) or 'none'}.",
+        f"Write folders: {', '.join(folder or '.' for folder in access.write) or 'none'}.",
+        f"Note types you may write: {', '.join(writable) or 'none'}.",
+    ]
+    sections = ["### Vault rules\n\n" + "\n".join(summary)]
     rules = _agent_rules(active)
     if rules:
         sections.append(f"### Rules for {access.agent} (from the vault AGENTS.md)\n\n{rules}")
     notes: list[tuple[str, str]] = []
     for path in access.session_context:
         try:
-            note = read_note(active.root, path, agent=access.agent, folders=access.read)
+            note = read_note(active.vault, path, agent=access.agent, folders=access.read)
         except VaultError as exc:
             logger.warning("Skipping session context note %s: %s", path, exc)
             continue
         # A note cannot close its own data block.
         notes.append((path, note.body.strip().replace(f"</{_NOTE_TAG}", f"<\\/{_NOTE_TAG}")))
-    if not sections and not notes:
-        return ""
     if notes:
         sections.append(_NOTES_PREAMBLE)
     context = "## Obsidian vault context\n\n" + "\n\n".join(sections)
@@ -221,7 +216,7 @@ class VaultSession:
         if target is None or self.started_at is None:
             logger.info("No session log target for personality %s", active.profile)
             return
-        rule = load_schema(active.root).types.get(target.type)
+        rule = active.vault.schema.types.get(target.type)
         if rule is None:
             raise VaultError(f"session log type `{target.type}` is not in the vault schema")
         started = self.started_at
@@ -244,7 +239,7 @@ class VaultSession:
                 break
             lines.append(line)
         write_note(
-            active.root,
+            active.vault,
             path,
             agent=active.access.agent,
             folders=active.access.write,
@@ -265,7 +260,7 @@ class VaultSession:
             return
         today = ended_at.date()
         this_week = today - timedelta(days=today.weekday())
-        rule = load_schema(active.root).types.get(target.type)
+        rule = active.vault.schema.types.get(target.type)
         if rule is None:
             raise VaultError(f"weekly memory type `{target.type}` is not in the vault schema")
         # Newest first, back to the latest week with a memory: the session end that wrote it summarized all before.
@@ -280,13 +275,13 @@ class VaultSession:
             }
             values |= {"slug": values["week"].lower(), "title": values["week"]}
             path = f"{target.folder}/{fill_placeholders(rule.name or '{week}', values)}.md"
-            if note_path(active.root, path).exists():
+            if note_path(active.vault.root, path).exists():
                 break
             missing.append((week_start, path, values))
         if not missing:
             return
         logs, truncated = query_notes(
-            active.root,
+            active.vault,
             agent=active.access.agent,
             folders=active.access.read,
             folder=source.folder,
@@ -314,12 +309,12 @@ class VaultSession:
                 continue
             lines = [f"# {active.profile} weekly memory {values['week']} (week of {week_start.isoformat()})", ""]
             for log_path in log_paths:
-                note = read_note(active.root, log_path, agent=active.access.agent, folders=active.access.read)
+                note = read_note(active.vault, log_path, agent=active.access.agent, folders=active.access.read)
                 said = [line.removeprefix(prefix) for line in note.body.splitlines() if line.startswith(prefix)]
                 lines.append(f"- [[{log_path.removesuffix('.md')}]] ({len(said)} user turns)")
                 lines += [f"  - {text[:_WEEKLY_EXCERPT_CHARS]}" for text in said[:_WEEKLY_EXCERPT_TURNS]]
             write_note(
-                active.root,
+                active.vault,
                 path,
                 agent=active.access.agent,
                 folders=active.access.write,

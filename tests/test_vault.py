@@ -12,6 +12,7 @@ from reachy_mini_conversation_app.vault import (
     SchemaError,
     RefusedError,
     read_note,
+    open_vault,
     parse_note,
     write_note,
     query_notes,
@@ -35,7 +36,7 @@ def _write(
     folders: tuple[str, ...] = WRITE,
 ) -> bool:
     return write_note(
-        vault, path, agent=agent, folders=folders, run=RUN, properties=properties, body=body, today=TODAY
+        open_vault(vault), path, agent=agent, folders=folders, run=RUN, properties=properties, body=body, today=TODAY
     )
 
 
@@ -207,16 +208,20 @@ def test_write_refuses_credential_content(fixture_vault: Path, body: str, patter
 
 def test_read_and_query_respect_both_allowlists(fixture_vault: Path) -> None:
     """Reads need store and schema access; queries filter by properties and created range."""
-    note = read_note(fixture_vault, "Emma/Conversation Playbook/Current.md", agent="emma", folders=READ)
+    note = read_note(open_vault(fixture_vault), "Emma/Conversation Playbook/Current.md", agent="emma", folders=READ)
     assert note.properties == {"type": "emma-playbook", "created": "2026-09-19"}
     assert note.body == "Ask about the dinosaur book.\n"
     with pytest.raises(RefusedError):
-        read_note(fixture_vault, "System/Schema.md", agent="emma", folders=("*",))
+        read_note(open_vault(fixture_vault), "System/Schema.md", agent="emma", folders=("*",))
     with pytest.raises(RefusedError):
-        read_note(fixture_vault, "Emma/Research/draft-topic.md", agent="emma", folders=("Emma/Sessions",))
+        read_note(open_vault(fixture_vault), "Emma/Research/draft-topic.md", agent="emma", folders=("Emma/Sessions",))
 
     notes, truncated = query_notes(
-        fixture_vault, agent="emma", folders=READ, where={"type": "research"}, created_from=date(2026, 9, 2)
+        open_vault(fixture_vault),
+        agent="emma",
+        folders=READ,
+        where={"type": "research"},
+        created_from=date(2026, 9, 2),
     )
     assert [summary.path for summary in notes] == ["Emma/Research/draft-topic.md"]
     assert truncated is False
@@ -224,7 +229,9 @@ def test_read_and_query_respect_both_allowlists(fixture_vault: Path) -> None:
 
 def test_query_reports_truncation_at_the_limit(fixture_vault: Path) -> None:
     """More matches than `limit` return the first `limit` matches and a truncation flag."""
-    notes, truncated = query_notes(fixture_vault, agent="emma", folders=READ, where={"type": "research"}, limit=1)
+    notes, truncated = query_notes(
+        open_vault(fixture_vault), agent="emma", folders=READ, where={"type": "research"}, limit=1
+    )
 
     assert [summary.path for summary in notes] == ["Emma/Research/approved-topic.md"]
     assert truncated is True
@@ -236,7 +243,7 @@ def test_query_skips_and_logs_notes_that_cannot_be_read(fixture_vault: Path, cap
     (research / "bad-yaml.md").write_text("---\ntype: [research\n---\nText.\n", encoding="utf-8")
     (research / "bad-bytes.md").write_bytes(b"---\ntype: research\ncreated: 2026-09-05\n---\n\xff\xfe\n")
 
-    notes, _truncated = query_notes(fixture_vault, agent="emma", folders=READ, where={"type": "research"})
+    notes, _truncated = query_notes(open_vault(fixture_vault), agent="emma", folders=READ, where={"type": "research"})
 
     assert [summary.path for summary in notes] == ["Emma/Research/approved-topic.md", "Emma/Research/draft-topic.md"]
     assert "Skipping vault note Emma/Research/bad-yaml.md" in caplog.text
@@ -247,11 +254,12 @@ def test_reads_and_queries_load_only_a_bounded_prefix(fixture_vault: Path) -> No
     """A large synced note does not load into memory: reads return a capped body, queries only frontmatter."""
     large = fixture_vault / "Emma/Research/large.md"
     large.write_text("---\ntype: research\ncreated: 2026-09-10\n---\n" + "x" * (8 * 1024 * 1024), encoding="utf-8")
+    vault = open_vault(fixture_vault)
 
     tracemalloc.start()
     try:
-        note = read_note(fixture_vault, "Emma/Research/large.md", agent="emma", folders=READ)
-        notes, _truncated = query_notes(fixture_vault, agent="emma", folders=READ, where={"type": "research"})
+        note = read_note(vault, "Emma/Research/large.md", agent="emma", folders=READ)
+        notes, _truncated = query_notes(vault, agent="emma", folders=READ, where={"type": "research"})
         _current, peak = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
@@ -269,7 +277,7 @@ def test_read_refuses_frontmatter_over_the_cap(fixture_vault: Path) -> None:
     )
 
     with pytest.raises(VaultError, match="frontmatter is longer"):
-        read_note(fixture_vault, "Emma/Research/long-yaml.md", agent="emma", folders=READ)
+        read_note(open_vault(fixture_vault), "Emma/Research/long-yaml.md", agent="emma", folders=READ)
 
 
 def test_schema_needs_exactly_one_valid_block() -> None:
@@ -286,4 +294,4 @@ def test_schema_needs_exactly_one_valid_block() -> None:
 def test_read_missing_note_is_an_error(fixture_vault: Path) -> None:
     """A missing note is a VaultError, not a crash."""
     with pytest.raises(VaultError, match="not found"):
-        read_note(fixture_vault, "Emma/Sessions/none.md", agent="emma", folders=READ)
+        read_note(open_vault(fixture_vault), "Emma/Sessions/none.md", agent="emma", folders=READ)

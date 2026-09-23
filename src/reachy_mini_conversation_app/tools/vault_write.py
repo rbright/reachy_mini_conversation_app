@@ -57,7 +57,7 @@ class VaultWrite(Tool):
             active = await asyncio.to_thread(active_vault, deps.instance_path)
             created = await asyncio.to_thread(
                 write_note,
-                active.root,
+                active.vault,
                 path.strip(),
                 agent=active.access.agent,
                 folders=active.access.write,

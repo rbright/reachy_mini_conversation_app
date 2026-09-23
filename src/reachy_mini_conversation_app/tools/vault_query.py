@@ -61,7 +61,7 @@ class VaultQuery(Tool):
             active = await asyncio.to_thread(active_vault, deps.instance_path)
             notes, truncated = await asyncio.to_thread(
                 query_notes,
-                active.root,
+                active.vault,
                 agent=active.access.agent,
                 folders=active.access.read,
                 folder=folder,

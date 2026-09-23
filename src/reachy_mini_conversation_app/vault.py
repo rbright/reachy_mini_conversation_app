@@ -224,12 +224,20 @@ def parse_schema(text: str) -> Schema:
         raise SchemaError(f"{SCHEMA_PATH} is invalid: {validation_summary(error)}") from None
 
 
-def load_schema(vault: Path) -> Schema:
-    """Read and parse `System/Schema.md` of a vault."""
-    path = vault / SCHEMA_PATH
+@dataclass(frozen=True)
+class Vault:
+    """A local vault and its schema, loaded once for one operation."""
+
+    root: Path
+    schema: Schema
+
+
+def open_vault(root: Path) -> Vault:
+    """Read and parse `System/Schema.md` of the vault at `root`."""
+    path = root / SCHEMA_PATH
     if not path.is_file():
         raise SchemaError(f"{SCHEMA_PATH} not found; this vault has no contract schema yet")
-    return parse_schema(path.read_text(encoding="utf-8"))
+    return Vault(root=root, schema=parse_schema(path.read_text(encoding="utf-8")))
 
 
 def parse_note(text: str) -> tuple[dict[str, object] | None, str]:
@@ -396,11 +404,11 @@ def _read_note_prefix(target: Path, body_max_chars: int) -> tuple[dict[str, obje
 
 
 def read_note(
-    vault: Path, path: str, *, agent: str, folders: Sequence[str], body_max_chars: int = READ_BODY_MAX_CHARS
+    vault: Vault, path: str, *, agent: str, folders: Sequence[str], body_max_chars: int = READ_BODY_MAX_CHARS
 ) -> NoteView:
     """Read one note that both the vault schema and `folders` let `agent` read, with its body capped."""
-    access = _schema_agent(load_schema(vault), agent)
-    target = note_path(vault, path)
+    access = _schema_agent(vault.schema, agent)
+    target = note_path(vault.root, path)
     if not (covers(folders, path) and covers(access.read, path)):
         raise RefusedError(f"agent `{agent}` cannot read `{path}`")
     if not target.is_file():
@@ -419,7 +427,7 @@ def _property_matches(actual: JsonValue, expected: JsonValue) -> bool:
 
 
 def query_notes(
-    vault: Path,
+    vault: Vault,
     *,
     agent: str,
     folders: Sequence[str],
@@ -430,8 +438,8 @@ def query_notes(
     limit: int = 50,
 ) -> tuple[list[NoteSummary], bool]:
     """Return readable notes whose properties equal `where` (list properties: contain), and a truncation flag."""
-    access = _schema_agent(load_schema(vault), agent)
-    root = vault.resolve()
+    access = _schema_agent(vault.schema, agent)
+    root = vault.root.resolve()
     scope = None if folder is None else normalize_folder(folder)
     matches: list[NoteSummary] = []
     for directory, dirnames, filenames in os.walk(root):
@@ -474,7 +482,7 @@ def _credential(text: str) -> str | None:
 
 
 def write_note(
-    vault: Path,
+    vault: Vault,
     path: str,
     *,
     agent: str,
@@ -487,9 +495,9 @@ def write_note(
     """Create or update one note under the contract and return whether it was created."""
     if not _RUN.fullmatch(run):
         raise RefusedError("run id has a bad format")
-    schema = load_schema(vault)
+    schema = vault.schema
     access = _schema_agent(schema, agent)
-    target = note_path(vault, path)
+    target = note_path(vault.root, path)
     if covers((SYSTEM_FOLDER,), path):
         raise RefusedError(f"agents never write `{SYSTEM_FOLDER}/`")
     if not (covers(folders, path) and covers(access.write, path)):
