@@ -9,6 +9,7 @@ from collections.abc import Callable
 from pydantic import ValidationError
 
 from reachy_mini.apps.jsonrpc_server import JsonRpcServer
+from reachy_mini_conversation_app.vault import validation_summary
 from reachy_mini_conversation_app.config import LOCKED_PROFILE, config
 from reachy_mini_conversation_app.personality import AvailableTool, list_personalities, available_tool_catalog
 from reachy_mini_conversation_app.profile_store import (
@@ -258,11 +259,7 @@ def register_profile_tool_methods(
         try:
             access = None if raw_access is None else ProfileVaultAccess.model_validate(raw_access)
         except ValidationError as exc:
-            details = "; ".join(
-                f"{'.'.join(str(part) for part in detail['loc']) or 'access'}: {detail['msg']}"
-                for detail in exc.errors(include_input=False, include_url=False)
-            )
-            raise_tool_settings_error("invalid_vault_access", details)
+            raise_tool_settings_error("invalid_vault_access", validation_summary(exc))
         try:
             known_profile_names = await asyncio.to_thread(_known_profile_names)
             profile_name = _validated_profile(requested_profile, known_profile_names)

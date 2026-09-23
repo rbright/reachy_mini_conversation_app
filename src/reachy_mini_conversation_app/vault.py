@@ -200,6 +200,15 @@ class NoteSummary:
     properties: dict[str, JsonValue]
 
 
+def validation_summary(error: ValidationError) -> str:
+    """Return the locations and messages of a validation error, never its input values."""
+    # Input values can hold note text or secrets.
+    return "; ".join(
+        f"{'.'.join(str(part) for part in detail['loc']) or 'value'}: {detail['msg']}"
+        for detail in error.errors(include_input=False, include_url=False)
+    )
+
+
 def parse_schema(text: str) -> Schema:
     """Parse the one `yaml vault-schema` block of a schema note."""
     blocks = _SCHEMA_BLOCK.findall(text)
@@ -212,12 +221,7 @@ def parse_schema(text: str) -> Schema:
     try:
         return Schema.model_validate(document)
     except ValidationError as error:
-        # Input values can hold note text. Report locations and messages only.
-        details = "; ".join(
-            f"{'.'.join(str(part) for part in detail['loc']) or 'value'}: {detail['msg']}"
-            for detail in error.errors(include_input=False, include_url=False)
-        )
-        raise SchemaError(f"{SCHEMA_PATH} is invalid: {details}") from None
+        raise SchemaError(f"{SCHEMA_PATH} is invalid: {validation_summary(error)}") from None
 
 
 def load_schema(vault: Path) -> Schema:
