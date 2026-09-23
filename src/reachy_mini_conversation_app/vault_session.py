@@ -193,13 +193,15 @@ class VaultSession:
         if rule is None:
             raise VaultError(f"session log type `{target.type}` is not in the vault schema")
         started = self.started_at
+        # The session id suffix keeps two sessions in one minute apart; a log is never overwritten.
+        suffix = self.session_id.rsplit("-", 1)[-1]
         values = {
             **_calendar_values(started.date()),
             "time": f"{started:%H%M}",
-            "slug": f"{started:%H%M}",
-            "title": f"{started:%Y-%m-%d %H%M}",
+            "slug": f"{started:%H%M}-{suffix}",
+            "title": f"{started:%Y-%m-%d %H%M} {suffix}",
         }
-        path = f"{target.folder}/{fill_placeholders(rule.name or '{date}-{time}', values)}.md"
+        path = f"{target.folder}/{fill_placeholders(rule.name or '{date}-{slug}', values)}.md"
         lines = [f"# {active.profile} session {started:%Y-%m-%d %H:%M}", ""]
         size = 0
         for role, text in self.turns:

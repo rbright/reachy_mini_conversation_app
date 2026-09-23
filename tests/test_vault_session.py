@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 from datetime import date, datetime
 
@@ -85,11 +86,13 @@ def test_session_end_writes_one_log_and_skips_empty_sessions(emma_vault: Path, f
     session = VaultSession()
     session.begin(emma_vault, now=datetime(2026, 9, 23, 14, 5))
     run = session.run_id("emma")
+    suffix = session.session_id.rsplit("-", 1)[-1]
     session.record("user", "I saw a  T-rex\ntoday")
     session.record("assistant", "Wow, a T-rex!")
     session.end(emma_vault, now=datetime(2026, 9, 23, 14, 20))
 
-    properties, body = parse_note((fixture_vault / "Emma/Sessions/2026-09-23-1405.md").read_text(encoding="utf-8"))
+    log = fixture_vault / f"Emma/Sessions/2026-09-23-1405-{suffix}.md"
+    properties, body = parse_note(log.read_text(encoding="utf-8"))
     assert properties is not None
     assert properties["type"] == "emma-session"
     assert properties["date"] == date(2026, 9, 23)
@@ -99,6 +102,20 @@ def test_session_end_writes_one_log_and_skips_empty_sessions(emma_vault: Path, f
     assert "**Emma:** Wow, a T-rex!" in body
     assert session.started_at is None and session.turns == []
     assert not (fixture_vault / "Emma/Weekly Memories").exists()
+
+
+def test_two_sessions_in_one_minute_write_two_logs(emma_vault: Path, fixture_vault: Path) -> None:
+    """Each session gets its own log, even when two sessions start in the same minute."""
+    for said in ("First chat", "Second chat"):
+        session = VaultSession()
+        session.begin(emma_vault, now=datetime(2026, 9, 23, 14, 5, 10))
+        session.record("user", said)
+        session.end(emma_vault, now=datetime(2026, 9, 23, 14, 5, 50))
+
+    bodies = sorted(log.read_text(encoding="utf-8") for log in (fixture_vault / "Emma/Sessions").iterdir())
+    assert len(bodies) == 2
+    assert "**User:** First chat" in "".join(bodies)
+    assert "**User:** Second chat" in "".join(bodies)
 
 
 def test_profile_change_ends_the_old_profiles_session(
@@ -145,7 +162,7 @@ def test_first_session_end_of_a_week_writes_last_weeks_memory(emma_vault: Path, 
     assert properties is not None
     assert properties["type"] == "emma-memory"
     assert properties["week_of"] == date(2026, 9, 14)
-    assert "[[Emma/Sessions/2026-09-15-1000]] (1 user turns)" in body
+    assert re.search(r"\[\[Emma/Sessions/2026-09-15-1000-[0-9a-f]{6}\]\] \(1 user turns\)", body)
     assert "  - Owls fly" in body
     assert "Good morning" not in body
 
