@@ -388,15 +388,17 @@ def _read_note_prefix(target: Path, body_max_chars: int) -> tuple[dict[str, obje
     return frontmatter, body[:body_max_chars], len(body) > body_max_chars
 
 
-def read_note(vault: Path, path: str, *, agent: str, folders: Sequence[str]) -> NoteView:
-    """Read one note that both the vault schema and `folders` let `agent` read."""
+def read_note(
+    vault: Path, path: str, *, agent: str, folders: Sequence[str], body_max_chars: int = READ_BODY_MAX_CHARS
+) -> NoteView:
+    """Read one note that both the vault schema and `folders` let `agent` read, with its body capped."""
     access = _schema_agent(load_schema(vault), agent)
     target = note_path(vault, path)
     if not (covers(folders, path) and covers(access.read, path)):
         raise RefusedError(f"agent `{agent}` cannot read `{path}`")
     if not target.is_file():
         raise VaultError(f"note not found: {path}")
-    frontmatter, body, truncated = _read_note_prefix(target, READ_BODY_MAX_CHARS)
+    frontmatter, body, truncated = _read_note_prefix(target, body_max_chars)
     return NoteView(
         path=path,
         properties={key: _json(value) for key, value in (frontmatter or {}).items()},

@@ -47,7 +47,7 @@ types:
   research: {class: artifact, folders: [Emma/Research], name: "{slug}", values: {confidence: [low, high]}}
 agents:
   emma:
-    read: [Emma/Conversation Playbook, Emma/Sessions, Emma/Weekly Memories, Emma/Research, Private]
+    read: [".", Emma/Conversation Playbook, Emma/Sessions, Emma/Weekly Memories, Emma/Research, Private]
     write: [Emma/Sessions, Emma/Weekly Memories, Emma/Research, Private]
 ```
 """
