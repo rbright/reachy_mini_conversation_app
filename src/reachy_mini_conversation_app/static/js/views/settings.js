@@ -15,7 +15,7 @@ import {
   untilReady,
 } from "../api.js";
 import { BACKENDS } from "../constants.js";
-import { buildProfileVaultAccessSection } from "../components/profile-vault-access.js";
+import { buildProfileVaultAccessSection } from "../components/vault-access.js";
 import { h } from "../ui.js";
 
 const HF_CONNECTION_MODES = Object.freeze({
