@@ -28,6 +28,8 @@ logger = logging.getLogger(__name__)
 SESSION_CONTEXT_MAX_CHARS = 8000
 TRANSCRIPT_MAX_CHARS = 20000
 AGENTS_FILENAME = "AGENTS.md"
+# The agent section can sit anywhere in AGENTS.md, so this read cap is larger than the context cap.
+AGENTS_MAX_CHARS = 32000
 _WEEKLY_EXCERPT_TURNS = 3
 _WEEKLY_EXCERPT_CHARS = 200
 _WEEKLY_MAX_LOGS = 200
@@ -77,7 +79,8 @@ def _agent_rules(root: Path, agent: str) -> str:
     agents_file = root / AGENTS_FILENAME
     if not agents_file.is_file() or agents_file.is_symlink():
         return ""
-    text = agents_file.read_text(encoding="utf-8")
+    with agents_file.open(encoding="utf-8") as handle:
+        text = handle.read(AGENTS_MAX_CHARS)
     headings = list(_HEADING.finditer(text))
     for index, heading in enumerate(headings):
         if heading.group(2).strip().lower() != agent:

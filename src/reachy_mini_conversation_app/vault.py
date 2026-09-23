@@ -24,6 +24,7 @@ LOCKED_STATUSES = ("approved", "superseded")
 # The write path sets these keys. A caller cannot supply them.
 TOOL_KEYS = frozenset({"author", "run", "created", "updated"})
 READ_BODY_MAX_CHARS = 8000
+FRONTMATTER_MAX_CHARS = 16000
 
 KeyType = Literal["text", "list", "number", "checkbox", "date", "datetime", "tags"]
 NoteClass = Literal["artifact", "record", "log", "reference"]
@@ -41,6 +42,7 @@ _DATE_TEXT = re.compile(r"\d{4}-\d{2}-\d{2}")
 _DATETIME_TEXT = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?")
 _SCHEMA_BLOCK = re.compile(r"^```yaml vault-schema[ \t]*\r?\n(.*?)^```[ \t]*\r?$", re.MULTILINE | re.DOTALL)
 _FRONTMATTER = re.compile(r"\A---[ \t]*\r?\n(.*?)(?:\r?\n)?^---[ \t]*(?:\r?\n|\Z)", re.MULTILINE | re.DOTALL)
+_FRONTMATTER_START = re.compile(r"---[ \t]*\r?\n")
 PLACEHOLDER = re.compile(r"\{([a-z_]+)\}")
 _NAME_PLACEHOLDERS = frozenset({"date", "slug", "title", "week", "month", "year", "quarter", "time"})
 # Obvious credentials only. A match refuses the write; the message names the pattern, never the text.
@@ -349,6 +351,23 @@ def _schema_agent(schema: Schema, agent: str) -> AgentAccess:
     return access
 
 
+def _read_note_prefix(target: Path, body_max_chars: int) -> tuple[dict[str, object] | None, str, bool]:
+    """Return the frontmatter, at most `body_max_chars` of the body, and whether the body is longer."""
+    # A synced note can be large; read only what the caller can return, never the whole file.
+    limit = FRONTMATTER_MAX_CHARS + body_max_chars + 1
+    try:
+        with target.open(encoding="utf-8") as handle:
+            text = handle.read(limit)
+    except UnicodeDecodeError:
+        raise VaultError("note is not valid UTF-8") from None
+    frontmatter, body = parse_note(text)
+    if len(text) - len(body) > FRONTMATTER_MAX_CHARS or (
+        frontmatter is None and len(text) == limit and _FRONTMATTER_START.match(text)
+    ):
+        raise VaultError(f"frontmatter is longer than {FRONTMATTER_MAX_CHARS} characters")
+    return frontmatter, body[:body_max_chars], len(body) > body_max_chars
+
+
 def read_note(vault: Path, path: str, *, agent: str, folders: Sequence[str]) -> NoteView:
     """Read one note that both the vault schema and `folders` let `agent` read."""
     access = _schema_agent(load_schema(vault), agent)
@@ -357,12 +376,12 @@ def read_note(vault: Path, path: str, *, agent: str, folders: Sequence[str]) -> 
         raise RefusedError(f"agent `{agent}` cannot read `{path}`")
     if not target.is_file():
         raise VaultError(f"note not found: {path}")
-    frontmatter, body = parse_note(target.read_text(encoding="utf-8"))
+    frontmatter, body, truncated = _read_note_prefix(target, READ_BODY_MAX_CHARS)
     return NoteView(
         path=path,
         properties={key: _json(value) for key, value in (frontmatter or {}).items()},
-        body=body[:READ_BODY_MAX_CHARS],
-        truncated=len(body) > READ_BODY_MAX_CHARS,
+        body=body,
+        truncated=truncated,
     )
 
 
@@ -400,8 +419,8 @@ def query_notes(
             ):
                 continue
             try:
-                frontmatter, _body = parse_note(file_path.read_text(encoding="utf-8"))
-            except (VaultError, OSError, UnicodeDecodeError) as exc:
+                frontmatter, _body, _truncated = _read_note_prefix(file_path, 0)
+            except (VaultError, OSError) as exc:
                 logger.warning("Skipping vault note %s: %s", path, exc)
                 continue
             properties = {key: _json(value) for key, value in (frontmatter or {}).items()}
@@ -460,7 +479,7 @@ def write_note(
     merged: dict[str, object] = {}
     if exists:
         try:
-            frontmatter, _old_body = parse_note(target.read_text(encoding="utf-8"))
+            frontmatter, _body, _truncated = _read_note_prefix(target, 0)
         except VaultError as error:
             raise RefusedError(f"existing note cannot be updated: {error}") from None
         merged = dict(frontmatter or {})

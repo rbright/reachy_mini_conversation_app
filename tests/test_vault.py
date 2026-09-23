@@ -1,10 +1,13 @@
 import os
+import tracemalloc
 from pathlib import Path
 from datetime import date
 
 import pytest
 
 from reachy_mini_conversation_app.vault import (
+    READ_BODY_MAX_CHARS,
+    FRONTMATTER_MAX_CHARS,
     VaultError,
     SchemaError,
     RefusedError,
@@ -185,6 +188,35 @@ def test_query_skips_and_logs_notes_that_cannot_be_read(fixture_vault: Path, cap
     assert [summary.path for summary in notes] == ["Emma/Research/approved-topic.md", "Emma/Research/draft-topic.md"]
     assert "Skipping vault note Emma/Research/bad-yaml.md" in caplog.text
     assert "Skipping vault note Emma/Research/bad-bytes.md" in caplog.text
+
+
+def test_reads_and_queries_load_only_a_bounded_prefix(fixture_vault: Path) -> None:
+    """A large synced note does not load into memory: reads return a capped body, queries only frontmatter."""
+    large = fixture_vault / "Emma/Research/large.md"
+    large.write_text("---\ntype: research\ncreated: 2026-09-10\n---\n" + "x" * (8 * 1024 * 1024), encoding="utf-8")
+
+    tracemalloc.start()
+    try:
+        note = read_note(fixture_vault, "Emma/Research/large.md", agent="emma", folders=READ)
+        notes, _truncated = query_notes(fixture_vault, agent="emma", folders=READ, where={"type": "research"})
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert note.truncated is True
+    assert len(note.body) == READ_BODY_MAX_CHARS
+    assert "Emma/Research/large.md" in [summary.path for summary in notes]
+    assert peak < 1024 * 1024
+
+
+def test_read_refuses_frontmatter_over_the_cap(fixture_vault: Path) -> None:
+    """Frontmatter that does not close within the cap is an error, not a whole-file read."""
+    (fixture_vault / "Emma/Research/long-yaml.md").write_text(
+        "---\ntype: research\n" + "# filler\n" * (FRONTMATTER_MAX_CHARS // 9 + 1) + "---\nBody.\n", encoding="utf-8"
+    )
+
+    with pytest.raises(VaultError, match="frontmatter is longer"):
+        read_note(fixture_vault, "Emma/Research/long-yaml.md", agent="emma", folders=READ)
 
 
 def test_schema_needs_exactly_one_valid_block() -> None:
