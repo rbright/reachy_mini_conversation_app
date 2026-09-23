@@ -430,7 +430,7 @@ def write_note(
     folders: Sequence[str],
     run: str,
     properties: Mapping[str, JsonValue],
-    body: str | None,
+    body: str,
     today: date,
 ) -> bool:
     """Create or update one note under the contract and return whether it was created."""
@@ -449,7 +449,7 @@ def write_note(
     unknown = sorted(properties.keys() - schema.keys.keys())
     if unknown:
         raise RefusedError(f"keys are not in the schema keys: {', '.join(unknown)}")
-    found = _credential(body or "") or _credential(json.dumps(properties, default=str))
+    found = _credential(body) or _credential(json.dumps(properties, default=str))
     if found is not None:
         raise RefusedError(f"content matches a credential pattern ({found}); remove it before writing")
 
@@ -458,10 +458,9 @@ def write_note(
     if exists and not target.is_file():
         raise RefusedError("path exists and is not a file")
     merged: dict[str, object] = {}
-    old_body = ""
     if exists:
         try:
-            frontmatter, old_body = parse_note(target.read_text(encoding="utf-8"))
+            frontmatter, _old_body = parse_note(target.read_text(encoding="utf-8"))
         except VaultError as error:
             raise RefusedError(f"existing note cannot be updated: {error}") from None
         merged = dict(frontmatter or {})
@@ -516,7 +515,7 @@ def write_note(
     errors = schema_errors(schema, path, merged)
     if errors:
         raise RefusedError("note breaks the vault schema: " + "; ".join(errors))
-    atomic_write(target, render_note(merged, old_body if body is None else body))
+    atomic_write(target, render_note(merged, body))
     return not exists
 
 
