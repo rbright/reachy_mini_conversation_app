@@ -884,43 +884,51 @@ class LocalStream:
 
         @rpc.method("obsidian.configure")  # type: ignore[untyped-decorator]
         async def _rpc_obsidian_configure(params: dict[str, object]) -> dict[str, object]:
-            updates: dict[str, str] = {}
-            if "enabled" in params:
-                updates[OBSIDIAN_SYNC_ENABLED_ENV] = "true" if params["enabled"] is True else "false"
-            for param_name, env_name in (
-                ("vault", OBSIDIAN_SYNC_VAULT_ENV),
-                ("headless_bin", OBSIDIAN_HEADLESS_BIN_ENV),
-                ("device_name", OBSIDIAN_SYNC_DEVICE_NAME_ENV),
-            ):
-                updates[env_name] = str(params.get(param_name) or "").strip()
-            if updates.get(OBSIDIAN_SYNC_ENABLED_ENV) == "true" and not (
-                updates[OBSIDIAN_SYNC_VAULT_ENV] or config.OBSIDIAN_SYNC_VAULT
-            ):
+            texts = {
+                name: str(params.get(name) or "").strip()
+                for name in ("vault", "headless_bin", "device_name", "mode", "conflict_strategy", "path")
+            }
+            if params.get("enabled") is True and not (texts["vault"] or config.OBSIDIAN_SYNC_VAULT):
                 raise JsonRpcError("choose a remote vault", reason="obsidian_vault_required", code=-32602)
-            mode = str(params.get("mode") or "").strip()
-            if mode == "mirror-remote":
+            if texts["mode"] == "mirror-remote":
                 raise JsonRpcError("mirror-remote reverts local writes", reason="obsidian_mode_refused", code=-32602)
-            if mode and mode not in OBSIDIAN_SYNC_MODES:
+            if texts["mode"] and texts["mode"] not in OBSIDIAN_SYNC_MODES:
                 raise JsonRpcError("invalid Obsidian Sync mode", reason="invalid_obsidian_mode", code=-32602)
-            updates[OBSIDIAN_SYNC_MODE_ENV] = mode
-            strategy = str(params.get("conflict_strategy") or "").strip()
-            if strategy and strategy not in OBSIDIAN_SYNC_CONFLICT_STRATEGIES:
+            if texts["conflict_strategy"] and texts["conflict_strategy"] not in OBSIDIAN_SYNC_CONFLICT_STRATEGIES:
                 raise JsonRpcError(
                     "invalid Obsidian conflict strategy", reason="invalid_obsidian_conflict_strategy", code=-32602
                 )
-            updates[OBSIDIAN_SYNC_CONFLICT_STRATEGY_ENV] = strategy
-            path = str(params.get("path") or "").strip()
-            if path and not Path(path).expanduser().is_absolute():
+            if texts["path"] and not Path(texts["path"]).expanduser().is_absolute():
                 raise JsonRpcError("Obsidian local path must be absolute", reason="invalid_obsidian_path", code=-32602)
-            updates[OBSIDIAN_SYNC_PATH_ENV] = path
-            # A blank password input keeps the stored password, like the OpenAI key.
-            updates[OBSIDIAN_SYNC_E2EE_PASSWORD_ENV] = str(params.get("e2ee_password") or "").strip()
 
-            self._persist_env_values(updates)
-            if "path" in params and not path and config.OBSIDIAN_SYNC_PATH:
-                os.environ.pop(OBSIDIAN_SYNC_PATH_ENV, None)
-                self._remove_persisted_env_values((OBSIDIAN_SYNC_PATH_ENV,))
+            # A blank vault or E2EE password keeps the stored value (like the OpenAI key); a blank defaulted
+            # setting that the request names goes back to its default.
+            updates = {
+                OBSIDIAN_SYNC_VAULT_ENV: texts["vault"],
+                OBSIDIAN_SYNC_E2EE_PASSWORD_ENV: str(params.get("e2ee_password") or "").strip(),
+            }
+            if "enabled" in params:
+                updates[OBSIDIAN_SYNC_ENABLED_ENV] = "true" if params["enabled"] is True else "false"
+            cleared: list[str] = []
+            for name, env_name in (
+                ("headless_bin", OBSIDIAN_HEADLESS_BIN_ENV),
+                ("device_name", OBSIDIAN_SYNC_DEVICE_NAME_ENV),
+                ("mode", OBSIDIAN_SYNC_MODE_ENV),
+                ("conflict_strategy", OBSIDIAN_SYNC_CONFLICT_STRATEGY_ENV),
+                ("path", OBSIDIAN_SYNC_PATH_ENV),
+            ):
+                if texts[name]:
+                    updates[env_name] = texts[name]
+                elif name in params:
+                    cleared.append(env_name)
+
+            if cleared:
+                # Removed from the instance `.env` first, so that the reload in `_persist_env_values` cannot restore them.
+                self._remove_persisted_env_values(tuple(cleared))
+                for env_name in cleared:
+                    os.environ.pop(env_name, None)
                 refresh_runtime_config_from_env()
+            self._persist_env_values(updates)
             await asyncio.to_thread(obsidian_sync.supervisor.restart)
             return {"ok": True, "message": "Obsidian Sync settings saved.", **obsidian_sync.supervisor.status()}
 

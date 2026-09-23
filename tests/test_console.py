@@ -51,6 +51,8 @@ def restore_environment_and_config() -> Iterator[None]:
     for name in os.environ.keys() - environ.keys():
         del os.environ[name]
     os.environ.update(environ)
+    # Class-level defaults gain instance attributes on refresh; drop those too.
+    vars(config).clear()
     vars(config).update(settings)
 
 
@@ -1754,12 +1756,26 @@ def test_obsidian_configure_rejects_mirror_remote_and_missing_vault(
     assert not (tmp_path / ".env").exists()
 
 
-def test_obsidian_configure_blank_path_restores_the_default(obsidian_settings_app: FastAPI, tmp_path: Path) -> None:
-    """An explicit path can be cleared to return to `<instance>/obsidian/<vault>`."""
+def test_obsidian_configure_blank_settings_restore_their_defaults(
+    obsidian_settings_app: FastAPI, tmp_path: Path
+) -> None:
+    """A blank path, `ob` executable, device name, or mode goes back to its default; a blank vault keeps the vault."""
     custom = str(tmp_path / "custom-vault")
-    first = _rpc_call(obsidian_settings_app, "obsidian.configure", {"vault": "Luna", "path": custom})["result"]
-    second = _rpc_call(obsidian_settings_app, "obsidian.configure", {"path": ""})["result"]
+    first = _rpc_call(
+        obsidian_settings_app,
+        "obsidian.configure",
+        {"vault": "Luna", "path": custom, "headless_bin": "/opt/ob", "device_name": "kitchen", "mode": "pull-only"},
+    )["result"]
+    second = _rpc_call(
+        obsidian_settings_app,
+        "obsidian.configure",
+        {"vault": "", "path": "", "headless_bin": "", "device_name": "", "mode": ""},
+    )["result"]
 
-    assert first["path"] == custom
+    assert (first["path"], first["headless_bin"], first["device_name"]) == (custom, "/opt/ob", "kitchen")
+    assert second["vault"] == "Luna"
     assert second["path"] == str(tmp_path / "obsidian" / "Luna")
-    assert "OBSIDIAN_SYNC_PATH" not in dotenv_values(tmp_path / ".env")
+    assert (second["headless_bin"], second["device_name"], second["mode"]) == ("ob", "reachy-mini", "bidirectional")
+    persisted = dotenv_values(tmp_path / ".env")
+    for name in ("OBSIDIAN_SYNC_PATH", "OBSIDIAN_HEADLESS_BIN", "OBSIDIAN_SYNC_DEVICE_NAME", "OBSIDIAN_SYNC_MODE"):
+        assert name not in persisted
