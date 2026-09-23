@@ -191,11 +191,12 @@ def test_supervisor_links_vault_syncs_and_stops_with_sigint(
 def test_supervisor_restarts_failed_sync_with_backoff(fake_ob: FakeOb) -> None:
     """A failing `ob sync` restarts after each configured delay and reports its last error."""
     fake_ob.set_sync_behavior("fail")
-    delays = (0.2, 0.5, 1.0)
+    # The last delay is long, so the supervisor waits in `error` after the fourth failure until the test stops it.
+    delays = (0.1, 0.2, 0.3, 30.0)
     supervisor = ObsidianSyncSupervisor(restart_delays_seconds=delays)
     supervisor.start()
     try:
-        _wait_until(lambda: fake_ob.commands().count("sync") >= 4)
+        _wait_until(lambda: fake_ob.commands().count("sync") == 4 and supervisor.status()["state"] == "error")
         status = supervisor.status()
     finally:
         supervisor.stop()

@@ -42,6 +42,18 @@ from reachy_mini_conversation_app.profile_vault_access import (
 )
 
 
+@pytest.fixture(autouse=True)
+def restore_environment_and_config() -> Iterator[None]:
+    """Restore `os.environ` and `config` after each test; settings handlers write both."""
+    environ = dict(os.environ)
+    settings = dict(vars(config))
+    yield
+    for name in os.environ.keys() - environ.keys():
+        del os.environ[name]
+    os.environ.update(environ)
+    vars(config).update(settings)
+
+
 def _rpc_call(app: FastAPI, method: str, params: Any = None) -> dict[str, Any]:
     """Send one JSON-RPC request over /rpc and return the response envelope."""
     with TestClient(app).websocket_connect("/rpc") as ws:
@@ -1682,9 +1694,7 @@ _OBSIDIAN_CONFIG_NAMES = (
 def obsidian_settings_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[FastAPI]:
     """Return a settings app with Obsidian settings isolated and no `ob` installed."""
     for name in _OBSIDIAN_CONFIG_NAMES:
-        monkeypatch.setenv(name, "")
-        monkeypatch.delenv(name)
-        monkeypatch.setattr(config, name, getattr(config, name))
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(config, "OBSIDIAN_HEADLESS_BIN", str(tmp_path / "missing-ob"))
     monkeypatch.setattr(config, "INSTANCE_PATH", tmp_path)
     supervisor = ObsidianSyncSupervisor()
