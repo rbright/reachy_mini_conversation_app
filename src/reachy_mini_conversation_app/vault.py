@@ -459,7 +459,10 @@ def query_notes(
                 continue
             if all(_property_matches(properties.get(key), expected) for key, expected in (where or {}).items()):
                 matches.append(NoteSummary(path=path, properties=properties))
-    return matches[:limit], len(matches) > limit
+                # One match past the limit proves truncation; the rest of the vault is not read.
+                if len(matches) > limit:
+                    return matches[:limit], True
+    return matches, False
 
 
 def _credential(text: str) -> str | None:
