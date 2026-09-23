@@ -75,6 +75,21 @@ def test_session_start_loads_capped_context_once(emma_vault: Path, fixture_vault
     assert "Changed." not in session.context
 
 
+def test_session_context_lists_writable_types_in_the_vault_root(emma_vault: Path, fixture_vault: Path) -> None:
+    """A type whose folder is the vault root is writable when the profile grants the root."""
+    schema = fixture_vault / "System/Schema.md"
+    schema.write_text(
+        schema.read_text(encoding="utf-8").replace("types:\n", "types:\n  inbox: {class: artifact, folders: [.]}\n"),
+        encoding="utf-8",
+    )
+    write_profile_vault_access("Emma", ProfileVaultAccess.model_validate({**ACCESS, "write": ["."]}), emma_vault)
+    session = VaultSession()
+
+    session.begin(emma_vault)
+
+    assert "Note types you may write: `inbox`" in session.context
+
+
 def test_session_end_writes_one_log_and_skips_empty_sessions(emma_vault: Path, fixture_vault: Path) -> None:
     """A session with a user turn writes one contract log; a session without one writes nothing."""
     empty = VaultSession()

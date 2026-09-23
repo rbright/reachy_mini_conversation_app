@@ -9,12 +9,12 @@ from dataclasses import field, dataclass
 
 from reachy_mini_conversation_app.vault import (
     VaultError,
-    covers,
     note_path,
     read_note,
     write_note,
     load_schema,
     query_notes,
+    covers_folder,
     fill_placeholders,
 )
 from reachy_mini_conversation_app.config import config
@@ -103,12 +103,12 @@ def build_session_context(active: ActiveVault) -> str:
         writable = [
             f"`{name}` ({rule.note_class}; required: {', '.join(rule.required) or 'none'})"
             for name, rule in schema.types.items()
-            if rule.note_class != "reference" and any(covers(access.write, f"{folder}/_") for folder in rule.folders)
+            if rule.note_class != "reference" and any(covers_folder(access.write, folder) for folder in rule.folders)
         ]
         summary = [
             f"Vault `{schema.vault}`. You write as `agent/{access.agent}` with the vault tools.",
-            f"Read folders: {', '.join(access.read) or 'none'}.",
-            f"Write folders: {', '.join(access.write) or 'none'}.",
+            f"Read folders: {', '.join(folder or '.' for folder in access.read) or 'none'}.",
+            f"Write folders: {', '.join(folder or '.' for folder in access.write) or 'none'}.",
             f"Note types you may write: {', '.join(writable) or 'none'}.",
         ]
         sections.append("### Vault rules\n\n" + "\n".join(summary))

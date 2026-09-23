@@ -5,14 +5,24 @@ import re
 import json
 import logging
 import tempfile
-from typing import Literal
+from typing import Literal, Annotated
 from pathlib import Path
 from datetime import date, datetime
 from dataclasses import dataclass
 from collections.abc import Mapping, Sequence
 
 import yaml
-from pydantic import Field, BaseModel, JsonValue, ConfigDict, ValidationError, field_validator, model_validator
+from pydantic import (
+    Field,
+    BaseModel,
+    JsonValue,
+    ConfigDict,
+    AfterValidator,
+    PlainSerializer,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -76,9 +86,22 @@ class RefusedError(VaultError):
 
 
 def normalize_folder(value: str) -> str:
-    """Return a vault-relative folder without surrounding slashes; the vault root is ""."""
+    """Return a vault-relative folder without surrounding slashes; "." and "/" name the vault root ("")."""
     folder = value.strip().strip("/")
     return "" if folder == "." else folder
+
+
+def normalize_folders(folders: tuple[str, ...]) -> tuple[str, ...]:
+    """Return the normalized folders once each, without blank entries."""
+    return tuple(dict.fromkeys(normalize_folder(folder) for folder in folders if folder.strip()))
+
+
+# Stored and sent as "." for the root, so that a saved root grant reads back and shows as a folder line.
+Folders = Annotated[
+    tuple[str, ...],
+    AfterValidator(normalize_folders),
+    PlainSerializer(lambda folders: tuple(folder or "." for folder in folders)),
+]
 
 
 def covers(folders: Sequence[str], path: str) -> bool:
@@ -86,6 +109,13 @@ def covers(folders: Sequence[str], path: str) -> bool:
     return any(
         folder == "*" or (not folder and "/" not in path) or (folder and path.startswith(f"{folder}/"))
         for folder in folders
+    )
+
+
+def covers_folder(folders: Sequence[str], folder: str) -> bool:
+    """Return whether a vault-relative folder is one of `folders` or inside one ("*" is the whole vault)."""
+    return any(
+        granted == "*" or granted == folder or (granted and folder.startswith(f"{granted}/")) for granted in folders
     )
 
 
@@ -97,16 +127,11 @@ class TypeRule(_SchemaModel):
     """One note type of the vault schema."""
 
     note_class: NoteClass = Field(alias="class")
-    folders: tuple[str, ...] = Field(min_length=1)
+    folders: Folders = Field(min_length=1)
     name: str | None = None
     required: tuple[str, ...] = ()
     optional: tuple[str, ...] = ()
     values: dict[str, tuple[str, ...]] = Field(default_factory=dict)
-
-    @field_validator("folders")
-    @classmethod
-    def _normalize_folders(cls, folders: tuple[str, ...]) -> tuple[str, ...]:
-        return tuple(normalize_folder(folder) for folder in folders)
 
     @field_validator("name")
     @classmethod
@@ -120,13 +145,8 @@ class TypeRule(_SchemaModel):
 class AgentAccess(_SchemaModel):
     """Folders one agent may read and write, as the vault grants them."""
 
-    read: tuple[str, ...] = ()
-    write: tuple[str, ...] = ()
-
-    @field_validator("read", "write")
-    @classmethod
-    def _normalize(cls, folders: tuple[str, ...]) -> tuple[str, ...]:
-        return tuple(normalize_folder(folder) for folder in folders)
+    read: Folders = ()
+    write: Folders = ()
 
 
 class Schema(_SchemaModel):

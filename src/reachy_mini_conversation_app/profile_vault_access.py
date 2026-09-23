@@ -8,7 +8,7 @@ from pathlib import Path
 
 from pydantic import Field, BaseModel, ConfigDict, ValidationError, field_validator
 
-from reachy_mini_conversation_app.vault import AGENT_ID, normalize_folder
+from reachy_mini_conversation_app.vault import AGENT_ID, Folders, normalize_folder
 from reachy_mini_conversation_app.profile_store import canonical_profile_name
 from reachy_mini_conversation_app.profile_toolsets import get_profile_toolsets_path
 
@@ -47,8 +47,8 @@ class ProfileVaultAccess(_AccessModel):
     """Vault access for one profile. The vault schema must also grant every folder."""
 
     agent: str
-    read: tuple[str, ...] = ()
-    write: tuple[str, ...] = ()
+    read: Folders = ()
+    write: Folders = ()
     session_context: tuple[str, ...] = ()
     session_log: SessionNoteTarget | None = None
     weekly_memory: WeeklyMemoryTarget | None = None
@@ -59,11 +59,6 @@ class ProfileVaultAccess(_AccessModel):
         if not AGENT_ID.fullmatch(agent):
             raise ValueError("agent id must be lowercase letters, digits, '.', '_', or '-'")
         return agent
-
-    @field_validator("read", "write")
-    @classmethod
-    def _normalize_folders(cls, folders: tuple[str, ...]) -> tuple[str, ...]:
-        return tuple(dict.fromkeys(folder for folder in map(normalize_folder, folders) if folder))
 
     @field_validator("session_context")
     @classmethod
