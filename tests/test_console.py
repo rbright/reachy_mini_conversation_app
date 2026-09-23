@@ -9,19 +9,22 @@ from types import SimpleNamespace
 from typing import Any
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 
 import numpy as np
 import pytest
+from dotenv import dotenv_values
 from fastapi import FastAPI, HTTPException
 from numpy.typing import NDArray
 from fastapi.testclient import TestClient
 
 import reachy_mini_conversation_app.console as console_mod
+from reachy_mini_conversation_app import obsidian_sync
 from reachy_mini_conversation_app.config import HF_AVAILABLE_VOICES, OPENAI_AVAILABLE_VOICES, config
 from reachy_mini_conversation_app.console import LocalStream
 from reachy_mini_conversation_app.streaming import AdditionalOutputs
 from reachy_mini_conversation_app.wake_word import WakeWordEvent
+from reachy_mini_conversation_app.obsidian_sync import ObsidianSyncSupervisor
 from reachy_mini_conversation_app.startup_settings import (
     StartupSettings,
     load_startup_settings_into_runtime,
@@ -1612,3 +1615,92 @@ def test_backend_errors_redact_openai_credentials(monkeypatch: pytest.MonkeyPatc
     stream._set_backend_connection_state("disconnected", RuntimeError("request with do-not-expose failed"))
 
     assert stream._backend_error == "RuntimeError: request with [redacted] failed"
+
+
+_OBSIDIAN_CONFIG_NAMES = (
+    "OBSIDIAN_SYNC_ENABLED",
+    "OBSIDIAN_HEADLESS_BIN",
+    "OBSIDIAN_SYNC_VAULT",
+    "OBSIDIAN_SYNC_PATH",
+    "OBSIDIAN_SYNC_DEVICE_NAME",
+    "OBSIDIAN_SYNC_MODE",
+    "OBSIDIAN_SYNC_CONFLICT_STRATEGY",
+    "OBSIDIAN_SYNC_E2EE_PASSWORD",
+)
+
+
+@pytest.fixture
+def obsidian_settings_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[FastAPI]:
+    """Return a settings app with Obsidian settings isolated and no `ob` installed."""
+    for name in _OBSIDIAN_CONFIG_NAMES:
+        monkeypatch.setenv(name, "")
+        monkeypatch.delenv(name)
+        monkeypatch.setattr(config, name, getattr(config, name))
+    monkeypatch.setattr(config, "OBSIDIAN_HEADLESS_BIN", str(tmp_path / "missing-ob"))
+    monkeypatch.setattr(config, "INSTANCE_PATH", tmp_path)
+    supervisor = ObsidianSyncSupervisor()
+    monkeypatch.setattr(obsidian_sync, "supervisor", supervisor)
+    app = FastAPI()
+    LocalStream(MagicMock(), _rpc_robot(), settings_app=app, instance_path=str(tmp_path))._init_settings_ui_if_needed()
+    yield app
+    supervisor.stop()
+
+
+def test_obsidian_configure_persists_settings_and_hides_e2ee_password(
+    obsidian_settings_app: FastAPI, tmp_path: Path
+) -> None:
+    """The E2EE password persists in `.env` but never returns through RPC; a blank input keeps it."""
+    password = "e2ee #secret $pw"
+    first = _rpc_call(
+        obsidian_settings_app,
+        "obsidian.configure",
+        {
+            "enabled": True,
+            "headless_bin": str(tmp_path / "missing-ob"),
+            "vault": "Luna",
+            "path": "",
+            "device_name": "reachy-test",
+            "mode": "pull-only",
+            "conflict_strategy": "conflict",
+            "e2ee_password": password,
+        },
+    )["result"]
+    second = _rpc_call(
+        obsidian_settings_app, "obsidian.configure", {"vault": "Luna", "mode": "bidirectional", "e2ee_password": ""}
+    )["result"]
+    status = _rpc_call(obsidian_settings_app, "obsidian.status")["result"]
+
+    assert first["has_e2ee_password"] is True
+    assert first["vault"] == "Luna"
+    assert first["path"] == str(tmp_path / "obsidian" / "Luna")
+    assert first["mode"] == "pull-only"
+    assert first["available"] is False
+    assert second["mode"] == "bidirectional"
+    assert status["has_e2ee_password"] is True
+    for payload in (first, second, status):
+        assert password not in repr(payload)
+    assert dotenv_values(tmp_path / ".env")["OBSIDIAN_SYNC_E2EE_PASSWORD"] == password
+    assert config.OBSIDIAN_SYNC_E2EE_PASSWORD == password
+
+
+def test_obsidian_configure_rejects_mirror_remote_and_missing_vault(
+    obsidian_settings_app: FastAPI, tmp_path: Path
+) -> None:
+    """Mirror-remote mode is refused, and sync cannot be enabled without a vault."""
+    mirror = _rpc_call(obsidian_settings_app, "obsidian.configure", {"vault": "Luna", "mode": "mirror-remote"})
+    no_vault = _rpc_call(obsidian_settings_app, "obsidian.configure", {"enabled": True})
+
+    assert mirror["error"]["data"]["reason"] == "obsidian_mode_refused"
+    assert no_vault["error"]["data"]["reason"] == "obsidian_vault_required"
+    assert not (tmp_path / ".env").exists()
+
+
+def test_obsidian_configure_blank_path_restores_the_default(obsidian_settings_app: FastAPI, tmp_path: Path) -> None:
+    """An explicit path can be cleared to return to `<instance>/obsidian/<vault>`."""
+    custom = str(tmp_path / "custom-vault")
+    first = _rpc_call(obsidian_settings_app, "obsidian.configure", {"vault": "Luna", "path": custom})["result"]
+    second = _rpc_call(obsidian_settings_app, "obsidian.configure", {"path": ""})["result"]
+
+    assert first["path"] == custom
+    assert second["path"] == str(tmp_path / "obsidian" / "Luna")
+    assert "OBSIDIAN_SYNC_PATH" not in dotenv_values(tmp_path / ".env")

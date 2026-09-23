@@ -114,6 +114,14 @@ Copy `.env.example` to `.env` to configure a provider outside the web UI.
 | `REACHY_MINI_WAKE_WORD_MODEL` | Optional path to a custom openWakeWord ONNX model. Defaults to the bundled `Hey Emma` model. |
 | `REACHY_MINI_WAKE_WORD_THRESHOLD` | Wake confidence threshold, greater than `0` through `1`. Defaults to `0.5`. |
 | `REACHY_MINI_SLEEP_PHRASES` | Comma-separated phrases matched against final user transcripts. Defaults include `Goodbye Emma` and `go to sleep`. |
+| `OBSIDIAN_SYNC_ENABLED` | Runs Obsidian Sync for one vault. Defaults to `false`. See [Obsidian Sync](#obsidian-sync). |
+| `OBSIDIAN_HEADLESS_BIN` | Obsidian Headless executable. Defaults to `ob` on `PATH`. |
+| `OBSIDIAN_SYNC_VAULT` | Remote vault name or ID. The Settings UI lists the vaults of the signed-in account. |
+| `OBSIDIAN_SYNC_PATH` | Local vault folder. Defaults to `<instance path>/obsidian/<vault>`. |
+| `OBSIDIAN_SYNC_DEVICE_NAME` | Device name in the vault's sync history. Defaults to `reachy-mini`. |
+| `OBSIDIAN_SYNC_MODE` | `bidirectional` (default) or `pull-only`. `mirror-remote` is refused because it reverts local writes. |
+| `OBSIDIAN_SYNC_CONFLICT_STRATEGY` | `merge` (default) or `conflict`. |
+| `OBSIDIAN_SYNC_E2EE_PASSWORD` | End-to-end encryption password of the remote vault. The Settings UI can save or replace it and never returns it to the browser. |
 
 With wake gating enabled, the microphone runs only the local wake-word model until it detects the wake phrase. Reachy wakes and starts a fresh realtime session. A configured sleep phrase closes that session, moves Reachy to its sleep pose, and leaves the local detector running for the next wake phrase. The optional openWakeWord runtime is installed on Linux ARM64 with Python 3.11 or 3.12, which covers the Reachy Mini deployment. On other platforms or when that runtime cannot load, the app logs the error and continues in always-on mode.
 
@@ -169,6 +177,20 @@ HF_REALTIME_WS_URL=ws://127.0.0.1:8765/v1/realtime
 ```
 
 In the web UI's Settings view, select Hugging Face or OpenAI Realtime. Hugging Face keeps its hosted/local controls. OpenAI exposes its API key, validated model catalog, and native voice catalog. Voice choices update for the selected provider.
+
+### Obsidian Sync
+
+The app can keep one [Obsidian Sync](https://obsidian.md/sync) vault synced on the robot with [Obsidian Headless](https://www.npmjs.com/package/obsidian-headless) (`ob`). The app does not install `ob` or Node.js: install `obsidian-headless` (Node.js 22 or later) on the device first. If `ob` is missing, the Settings UI reports it and the conversation keeps working.
+
+Configure it in the Settings view, in the Obsidian Sync card:
+
+1. Sign in with your Obsidian account email, password, and 2FA code if you use one. The app passes them to `ob login` once and does not store them. `ob` keeps its own sign-in state in the app user's home folder.
+2. Load the remote vaults, choose one, and set the other options. Leave the local path blank to use `<instance path>/obsidian/<vault>`.
+3. Enter the vault's end-to-end encryption password if it has one, turn sync on, and save.
+
+The app links the local folder with `ob sync-setup` when needed, applies the mode, conflict strategy, and device name with `ob sync-config`, and runs `ob sync --continuous`. It writes the `ob` output to the app log, with the encryption password redacted. If `ob sync` fails, the app restarts it after 5 s, 30 s, and 120 s, then every 5 minutes. On app stop, it sends `SIGINT` and waits 10 s before it sends `SIGTERM`.
+
+Passwords reach `ob` on stdin, not on the command line. The encryption password is stored in the instance `.env` (mode `0600`), like the OpenAI key; the UI reports only whether it exists.
 
 ## Running the app
 

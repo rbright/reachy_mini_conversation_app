@@ -2,6 +2,8 @@
 
 const DEFAULT_TIMEOUT_MS = 8000;
 const TOOL_SPACE_TIMEOUT_MS = 60000;
+// `ob` commands reach Obsidian's servers, and saving waits for the sync process to stop (up to ~30 s).
+const OBSIDIAN_TIMEOUT_MS = 150000;
 
 const RPC_URL = `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/rpc`;
 
@@ -143,6 +145,15 @@ export const applyVoice = (voice) => rpcCall("voices.apply", { voice });
 
 export const saveBackendConfig = (payload) => rpcCall("backend.config", payload);
 
+export const getObsidianStatus = () => rpcCall("obsidian.status");
+export const obsidianLogin = (payload) =>
+  rpcCall("obsidian.login", payload, { timeoutMs: OBSIDIAN_TIMEOUT_MS });
+export const listObsidianVaults = () =>
+  rpcCall("obsidian.list_vaults", {}, { timeoutMs: OBSIDIAN_TIMEOUT_MS });
+export const configureObsidian = (payload) =>
+  rpcCall("obsidian.configure", payload, { timeoutMs: OBSIDIAN_TIMEOUT_MS });
+export const obsidianLogout = () => rpcCall("obsidian.logout", {}, { timeoutMs: OBSIDIAN_TIMEOUT_MS });
+
 export const listToolSpaces = () => rpcCall("tool_spaces.list");
 export const addToolSpace = (slug) =>
   rpcCall("tool_spaces.add", { slug }, { timeoutMs: TOOL_SPACE_TIMEOUT_MS });
@@ -178,6 +189,12 @@ const ERROR_MESSAGES = Object.freeze({
   not_deletable: "This personality can't be deleted.",
   loop_unavailable: "Reachy is still starting up. Try again in a moment.",
   tool_space_not_installed: "That Tool Space is no longer installed.",
+  obsidian_credentials_required: "Enter your Obsidian email and password.",
+  obsidian_vault_required: "Choose a remote vault first.",
+  obsidian_mode_refused: "Mirror-remote mode is not supported: it reverts the robot's own notes.",
+  invalid_obsidian_mode: "Choose a supported sync mode.",
+  invalid_obsidian_conflict_strategy: "Choose a supported conflict strategy.",
+  invalid_obsidian_path: "Enter an absolute local path, or leave it blank for the default.",
 });
 
 /** Map a thrown error to user-facing copy, falling back to its raw message. */

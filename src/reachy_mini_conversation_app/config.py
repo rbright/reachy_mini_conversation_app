@@ -94,6 +94,19 @@ REALTIME_TRANSCRIPTION_LANGUAGE_ENV = "REALTIME_TRANSCRIPTION_LANGUAGE"
 HF_LOCAL_CONNECTION_MODE = "local"
 HF_DEPLOYED_CONNECTION_MODE = "deployed"
 HF_REALTIME_SESSION_PROXY_URL = "https://pollen-robotics-reachy-mini-realtime-url.hf.space/session"
+OBSIDIAN_SYNC_ENABLED_ENV = "OBSIDIAN_SYNC_ENABLED"
+OBSIDIAN_HEADLESS_BIN_ENV = "OBSIDIAN_HEADLESS_BIN"
+OBSIDIAN_SYNC_VAULT_ENV = "OBSIDIAN_SYNC_VAULT"
+OBSIDIAN_SYNC_PATH_ENV = "OBSIDIAN_SYNC_PATH"
+OBSIDIAN_SYNC_DEVICE_NAME_ENV = "OBSIDIAN_SYNC_DEVICE_NAME"
+OBSIDIAN_SYNC_MODE_ENV = "OBSIDIAN_SYNC_MODE"
+OBSIDIAN_SYNC_CONFLICT_STRATEGY_ENV = "OBSIDIAN_SYNC_CONFLICT_STRATEGY"
+OBSIDIAN_SYNC_E2EE_PASSWORD_ENV = "OBSIDIAN_SYNC_E2EE_PASSWORD"
+DEFAULT_OBSIDIAN_HEADLESS_BIN = "ob"
+DEFAULT_OBSIDIAN_SYNC_DEVICE_NAME = "reachy-mini"
+# The first entry is the default. `mirror-remote` is excluded: it reverts local writes, including the app's notes.
+OBSIDIAN_SYNC_MODES = ("bidirectional", "pull-only")
+OBSIDIAN_SYNC_CONFLICT_STRATEGIES = ("merge", "conflict")
 
 
 @dataclass(frozen=True)
@@ -169,6 +182,23 @@ def _env_flag(name: str, default: bool = False) -> bool:
 
     logger.warning("Invalid boolean value for %s=%r, using default=%s", name, raw, default)
     return default
+
+
+def _normalize_choice(env_name: str, value: str | None, choices: tuple[str, ...]) -> str:
+    """Return a supported value for a setting, falling back to its first choice."""
+    candidate = (value or "").strip().lower()
+    if not candidate:
+        return choices[0]
+    if candidate in choices:
+        return candidate
+
+    logger.warning("Invalid %s=%r. Expected one of %s; using %s.", env_name, value, ", ".join(choices), choices[0])
+    return choices[0]
+
+
+def _env_text(name: str) -> str | None:
+    """Return a stripped environment value, or None when unset or blank."""
+    return (os.getenv(name) or "").strip() or None
 
 
 APP_TIMEOUT_MINUTES_ENV = "REACHY_MINI_APP_TIMEOUT_MINUTES"
@@ -417,6 +447,20 @@ class Config:
     HF_REALTIME_WS_URL = os.getenv(HF_REALTIME_WS_URL_ENV)
     REALTIME_TRANSCRIPTION_LANGUAGE = _normalize_transcription_language(os.getenv(REALTIME_TRANSCRIPTION_LANGUAGE_ENV))
     HF_TOKEN = os.getenv("HF_TOKEN")  # Optional, falls back to hf auth login if not set
+    OBSIDIAN_SYNC_ENABLED = _env_flag(OBSIDIAN_SYNC_ENABLED_ENV, default=False)
+    OBSIDIAN_HEADLESS_BIN = _env_text(OBSIDIAN_HEADLESS_BIN_ENV) or DEFAULT_OBSIDIAN_HEADLESS_BIN
+    OBSIDIAN_SYNC_VAULT = _env_text(OBSIDIAN_SYNC_VAULT_ENV)
+    OBSIDIAN_SYNC_PATH = _env_text(OBSIDIAN_SYNC_PATH_ENV)
+    OBSIDIAN_SYNC_DEVICE_NAME = _env_text(OBSIDIAN_SYNC_DEVICE_NAME_ENV) or DEFAULT_OBSIDIAN_SYNC_DEVICE_NAME
+    OBSIDIAN_SYNC_MODE = _normalize_choice(
+        OBSIDIAN_SYNC_MODE_ENV, os.getenv(OBSIDIAN_SYNC_MODE_ENV), OBSIDIAN_SYNC_MODES
+    )
+    OBSIDIAN_SYNC_CONFLICT_STRATEGY = _normalize_choice(
+        OBSIDIAN_SYNC_CONFLICT_STRATEGY_ENV,
+        os.getenv(OBSIDIAN_SYNC_CONFLICT_STRATEGY_ENV),
+        OBSIDIAN_SYNC_CONFLICT_STRATEGIES,
+    )
+    OBSIDIAN_SYNC_E2EE_PASSWORD = _env_text(OBSIDIAN_SYNC_E2EE_PASSWORD_ENV)
 
     logger.debug(
         "Backend provider: %s, OpenAI model: %s, HF mode: %s, HF session URL set: %s, HF direct URL set: %s",
@@ -534,6 +578,20 @@ def refresh_runtime_config_from_env() -> None:
     )
     config.HF_TOKEN = os.getenv("HF_TOKEN")
     config.REACHY_MINI_CUSTOM_PROFILE = LOCKED_PROFILE or os.getenv("REACHY_MINI_CUSTOM_PROFILE")
+    config.OBSIDIAN_SYNC_ENABLED = _env_flag(OBSIDIAN_SYNC_ENABLED_ENV, default=False)
+    config.OBSIDIAN_HEADLESS_BIN = _env_text(OBSIDIAN_HEADLESS_BIN_ENV) or DEFAULT_OBSIDIAN_HEADLESS_BIN
+    config.OBSIDIAN_SYNC_VAULT = _env_text(OBSIDIAN_SYNC_VAULT_ENV)
+    config.OBSIDIAN_SYNC_PATH = _env_text(OBSIDIAN_SYNC_PATH_ENV)
+    config.OBSIDIAN_SYNC_DEVICE_NAME = _env_text(OBSIDIAN_SYNC_DEVICE_NAME_ENV) or DEFAULT_OBSIDIAN_SYNC_DEVICE_NAME
+    config.OBSIDIAN_SYNC_MODE = _normalize_choice(
+        OBSIDIAN_SYNC_MODE_ENV, os.getenv(OBSIDIAN_SYNC_MODE_ENV), OBSIDIAN_SYNC_MODES
+    )
+    config.OBSIDIAN_SYNC_CONFLICT_STRATEGY = _normalize_choice(
+        OBSIDIAN_SYNC_CONFLICT_STRATEGY_ENV,
+        os.getenv(OBSIDIAN_SYNC_CONFLICT_STRATEGY_ENV),
+        OBSIDIAN_SYNC_CONFLICT_STRATEGIES,
+    )
+    config.OBSIDIAN_SYNC_E2EE_PASSWORD = _env_text(OBSIDIAN_SYNC_E2EE_PASSWORD_ENV)
 
 
 def get_backend_choice() -> str:

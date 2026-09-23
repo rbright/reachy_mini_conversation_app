@@ -128,6 +128,7 @@ def run(
     """Run the Reachy Mini conversation app."""
     start_import_warmup()
     # Putting these dependencies here makes the dashboard faster to load when the conversation app is installed
+    from reachy_mini_conversation_app import obsidian_sync
     from reachy_mini_conversation_app.moves import MovementManager
     from reachy_mini_conversation_app.config import (
         OPENAI_BACKEND,
@@ -401,6 +402,8 @@ def run(
     if app_stop_event:
         threading.Thread(target=poll_stop_event, daemon=True).start()
 
+    # Started here, right before the try block, so that every exit path stops the `ob sync` child process.
+    obsidian_sync.supervisor.start()
     try:
         stream_manager.launch()
     except KeyboardInterrupt:
@@ -408,6 +411,8 @@ def run(
     finally:
         if own_ui_server is not None:
             own_ui_server.should_exit = True
+
+        obsidian_sync.supervisor.stop()
 
         # Stop the motion writes without changing the robot's posture. If
         # the shutdown came from the voice go_to_sleep tool the robot is
