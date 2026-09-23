@@ -192,6 +192,36 @@ The app links the local folder with `ob sync-setup` when needed, applies the mod
 
 Passwords reach `ob` on stdin, not on the command line. The encryption password is stored in the instance `.env` (mode `0600`), like the OpenAI key; the UI reports only whether it exists.
 
+#### Vault access for personalities
+
+The `vault_read`, `vault_query`, and `vault_write` tools use the synced vault. The vault must have a `System/Schema.md` note with one `yaml vault-schema` block (the vault contract). Enable the tools for a personality in Tools → Tool access, then set its vault access in Settings → Vault access. The app stores it in `profile_vault_access.json`, next to `profile_toolsets.json`:
+
+```json
+{
+  "version": 1,
+  "profiles": {
+    "Emma": {
+      "agent": "emma",
+      "read": ["Emma/Conversation Playbook", "Emma/Sessions", "Emma/Weekly Memories"],
+      "write": ["Emma/Sessions", "Emma/Weekly Memories"],
+      "session_context": ["Emma/Conversation Playbook/Current.md"],
+      "session_log": {"folder": "Emma/Sessions", "type": "emma-session", "properties": {"date": "{date}"}},
+      "weekly_memory": {
+        "folder": "Emma/Weekly Memories",
+        "type": "emma-memory",
+        "date_weekday": 5,
+        "properties": {"date": "{date}", "week_of": "{week_start}"}
+      }
+    }
+  }
+}
+```
+
+- A folder must be in this list and in the `agents` section of the vault schema for the same agent. No agent writes `System/`.
+- `vault_write` sets `created`, `author: agent/<agent>`, and `run: reachy:<agent>:<session-id>`, and checks the note type, folder, and keys against the schema. It refuses paths with `..` or symbolic links, non-Markdown files, existing logs and dated notes, `approved` or `superseded` artifacts, and text that looks like a credential. It writes a temporary file and renames it.
+- At session start, the app adds the agent's section of the vault `AGENTS.md`, a schema summary, and the `session_context` notes to the instructions (8000 characters at most). Reconnects in the same wake session reuse them.
+- At session end (sleep phrase, app stop, or shutdown), the app writes one `session_log` note with the transcript. It writes nothing when the user did not speak. The note name comes from the type's `name` rule in the schema. At the first session end of a new ISO week, it also writes one `weekly_memory` note that lists last week's session logs. `{date}` in a weekly memory is the `date_weekday` day of that week.
+
 ## Running the app
 
 Activate your virtual environment, then launch:
@@ -243,6 +273,9 @@ Every bundled profile enables `head_tracking` by default; users can still disabl
 | `sweep_look` | Sweep Reachy's head left, right, and back to center. | Shared tool, enabled by default in the default profile. |
 | `remember` | Save one short, stable fact about the user for future sessions. | Core install only. Stored in the app instance data directory. |
 | `forget` | Remove a saved memory fact by matching a short query. | Core install only. |
+| `vault_read` | Read one note from the synced Obsidian vault. | Needs [Obsidian Sync](#obsidian-sync) and vault access for the personality. |
+| `vault_query` | List vault notes by folder, type, status, and created date. | Needs Obsidian Sync and vault access. |
+| `vault_write` | Create a note, or update a draft or owned record, under the vault contract. | Needs Obsidian Sync and write access. |
 | `volume_control` | Read or change Reachy's speaker or microphone volume. | Core install only. Uses the daemon REST API; setting the speaker volume plays a short confirmation sound. |
 | `robot_status` | Read one status topic: `name`, `software` (version, update available), `wifi` (IP address, network), `account` (Hugging Face sign-in), `imu` (which way the head is tilted, motion, temperature), `apps` (installed apps). | Core install only. Uses the daemon REST API. The update check and the Wi-Fi network details are wireless-version only; the IP address is reported on any robot. |
 | `pollen_robotics_reachy_mini_search_tool__search_web` | Search the web and return a short list of results. | Preinstalled MCP Space: `pollen-robotics/reachy-mini-search-tool`. |

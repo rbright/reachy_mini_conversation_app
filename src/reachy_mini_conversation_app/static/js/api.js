@@ -167,6 +167,11 @@ export const saveProfileTools = (profile, enabledTools) =>
 export const resetProfileTools = (profile) =>
   rpcCall("profile_tools.reset", { profile });
 
+export const getProfileVaultAccess = (profile) =>
+  rpcCall("profile_vault_access.get", profile ? { profile } : {});
+export const saveProfileVaultAccess = (profile, access) =>
+  rpcCall("profile_vault_access.save", { profile, access });
+
 /** Backend error codes that need friendlier copy than the raw code. */
 const ERROR_MESSAGES = Object.freeze({
   invalid_backend: "Unknown backend selected.",

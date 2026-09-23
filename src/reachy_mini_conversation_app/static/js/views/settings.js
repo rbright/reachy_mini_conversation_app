@@ -1,4 +1,4 @@
-/** Settings view: provider connection, voice, Obsidian Sync, and runtime status. */
+/** Settings view: provider connection, voice, Obsidian Sync, vault access, and runtime status. */
 
 import {
   applyVoice,
@@ -15,6 +15,7 @@ import {
   untilReady,
 } from "../api.js";
 import { BACKENDS } from "../constants.js";
+import { buildProfileVaultAccessSection } from "../components/profile-vault-access.js";
 import { h } from "../ui.js";
 
 const HF_CONNECTION_MODES = Object.freeze({
@@ -56,6 +57,7 @@ export async function mountSettingsView({ outlet, signal }) {
   });
   const voiceSection = buildVoiceSection();
   const obsidianSection = buildObsidianSection({ signal });
+  const vaultAccessSection = buildProfileVaultAccessSection({ signal });
   const statusSection = buildStatusSection();
 
   const view = h(
@@ -70,6 +72,7 @@ export async function mountSettingsView({ outlet, signal }) {
     connectionSection.element,
     voiceSection.element,
     obsidianSection.element,
+    vaultAccessSection.element,
     statusSection.element
   );
   outlet.replaceChildren(view);
@@ -78,6 +81,7 @@ export async function mountSettingsView({ outlet, signal }) {
     refreshStatus({ statusSection, connectionSection, signal }),
     refreshVoices({ voiceSection, signal }),
     obsidianSection.refresh(),
+    vaultAccessSection.refresh(),
   ]);
 }
 
