@@ -101,6 +101,28 @@ def test_session_end_writes_one_log_and_skips_empty_sessions(emma_vault: Path, f
     assert not (fixture_vault / "Emma/Weekly Memories").exists()
 
 
+def test_profile_change_ends_the_old_profiles_session(
+    emma_vault: Path, fixture_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Turns of a session stay with the profile that started it; the next connection starts a new session."""
+    no_notes = {key: value for key, value in ACCESS.items() if key not in ("session_log", "weekly_memory")}
+    write_profile_vault_access("Other", ProfileVaultAccess.model_validate(no_notes), emma_vault)
+    session = VaultSession()
+    session.begin(emma_vault, now=datetime(2026, 9, 23, 14, 5))
+    first_id = session.session_id
+    session.record("user", "Hello Emma")
+
+    monkeypatch.setattr(config, "REACHY_MINI_CUSTOM_PROFILE", "Other")
+    session.begin(emma_vault, now=datetime(2026, 9, 23, 14, 10))
+
+    logs = list((fixture_vault / "Emma/Sessions").iterdir())
+    assert len(logs) == 1
+    assert "**User:** Hello Emma" in logs[0].read_text(encoding="utf-8")
+    assert session.session_id != first_id
+    assert session.profile == "Other"
+    assert session.turns == []
+
+
 def test_first_session_end_of_a_week_writes_last_weeks_memory(emma_vault: Path, fixture_vault: Path) -> None:
     """The first session end in a new ISO week summarizes last week's logs once."""
     for start, said in (

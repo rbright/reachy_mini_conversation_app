@@ -103,7 +103,7 @@ async def test_openai_session_uses_direct_model_audio_and_tools(monkeypatch: pyt
 async def test_vault_context_is_appended_once_per_wake_session(monkeypatch: pytest.MonkeyPatch) -> None:
     """Reconnects reuse the session's vault context; a new session after the end reloads it."""
     loads: list[object] = []
-    monkeypatch.setattr(vault_session_mod, "active_vault", lambda _instance_path: "vault")
+    monkeypatch.setattr(vault_session_mod, "active_vault", lambda _instance_path, _profile: "vault")
     monkeypatch.setattr(
         vault_session_mod, "build_session_context", lambda active: loads.append(active) or f"Vault notes {len(loads)}"
     )

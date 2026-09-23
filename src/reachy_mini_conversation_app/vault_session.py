@@ -44,12 +44,12 @@ class ActiveVault:
     access: ProfileVaultAccess
 
 
-def active_vault(instance_path: str | Path | None) -> ActiveVault:
-    """Return the synced vault and the active profile's vault access, or raise `VaultError`."""
+def active_vault(instance_path: str | Path | None, profile: str | None = None) -> ActiveVault:
+    """Return the synced vault and a profile's vault access (default: the active profile), or raise `VaultError`."""
     root = current_vault_path()
     if root is None:
         raise VaultError("Obsidian Sync is off or the local vault folder does not exist")
-    profile = canonical_profile_name(config.REACHY_MINI_CUSTOM_PROFILE)
+    profile = profile or canonical_profile_name(config.REACHY_MINI_CUSTOM_PROFILE)
     try:
         access = read_profile_vault_access(instance_path).get(profile)
     except RuntimeError as exc:
@@ -127,23 +127,29 @@ def build_session_context(active: ActiveVault) -> str:
 
 @dataclass
 class VaultSession:
-    """One wake session: its run id, vault context, and transcript. Reconnects keep the running session."""
+    """One wake session of one profile: its run id, vault context, and transcript. Reconnects keep the session."""
 
     session_id: str = ""
+    profile: str = ""
     started_at: datetime | None = None
     context: str = ""
     turns: list[tuple[str, str]] = field(default_factory=list)
 
     def begin(self, instance_path: str | Path | None, now: datetime | None = None) -> None:
-        """Start the session and load its vault context, unless it already runs."""
+        """Start the session and load its vault context, unless it already runs for the active profile."""
+        profile = canonical_profile_name(config.REACHY_MINI_CUSTOM_PROFILE)
         if self.started_at is not None:
-            return
+            if self.profile == profile:
+                return
+            # A profile change ends the old profile's session, so its turns stay in its own vault notes.
+            self.end(instance_path, now)
         self.started_at = now or datetime.now().astimezone()
         self.session_id = f"{self.started_at:%Y%m%dT%H%M%S}-{uuid.uuid4().hex[:6]}"
+        self.profile = profile
         self.turns = []
         self.context = ""
         try:
-            self.context = build_session_context(active_vault(instance_path))
+            self.context = build_session_context(active_vault(instance_path, profile))
         except VaultError as exc:
             logger.info("No vault context for this session: %s", exc)
         except OSError as exc:
@@ -165,7 +171,7 @@ class VaultSession:
             return
         try:
             if any(role == "user" for role, _text in self.turns):
-                active = active_vault(instance_path)
+                active = active_vault(instance_path, self.profile)
                 ended_at = now or datetime.now().astimezone()
                 self._write_session_log(active)
                 self._write_weekly_memory(active, ended_at)
@@ -174,6 +180,7 @@ class VaultSession:
         finally:
             self.started_at = None
             self.session_id = ""
+            self.profile = ""
             self.context = ""
             self.turns = []
 
