@@ -225,6 +225,19 @@ def test_supervisor_sends_sigterm_when_sigint_is_ignored(fake_ob: FakeOb) -> Non
     assert [call["event"] for call in fake_ob.calls()][-2:] == ["SIGINT", "SIGTERM"]
 
 
+def test_restart_after_final_shutdown_starts_nothing(fake_ob: FakeOb) -> None:
+    """A settings restart that arrives after app shutdown cannot start an `ob sync` child that outlives the app."""
+    supervisor = ObsidianSyncSupervisor()
+    supervisor.start()
+    _wait_until(lambda: supervisor.status()["state"] == "syncing")
+
+    supervisor.shutdown()
+    supervisor.restart()
+
+    assert supervisor.status()["state"] == "stopped"
+    assert fake_ob.commands().count("sync") == 1
+
+
 def test_supervisor_refuses_a_path_linked_to_another_vault(fake_ob: FakeOb, tmp_path: Path) -> None:
     """A local path already linked to another vault is reported, not set up again."""
     (tmp_path / "vault").mkdir()

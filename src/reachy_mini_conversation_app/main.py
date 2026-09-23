@@ -421,7 +421,7 @@ def run(
         if own_ui_server is not None:
             own_ui_server.should_exit = True
 
-        obsidian_sync.supervisor.stop()
+        obsidian_sync.supervisor.shutdown()
 
         # Stop the motion writes without changing the robot's posture. If
         # the shutdown came from the voice go_to_sleep tool the robot is

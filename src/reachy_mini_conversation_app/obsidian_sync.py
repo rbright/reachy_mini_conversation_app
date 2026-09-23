@@ -128,7 +128,9 @@ class ObsidianSyncSupervisor:
         """Create a stopped supervisor."""
         self._restart_delays_seconds = restart_delays_seconds
         self._stop_grace_seconds = stop_grace_seconds
-        self._lock = threading.Lock()
+        # Held through each whole start, stop, and restart, so that no transition interleaves with another.
+        self._lock = threading.RLock()
+        self._shut_down = False
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._task: asyncio.Task[None] | None = None
@@ -160,9 +162,9 @@ class ObsidianSyncSupervisor:
         }
 
     def start(self) -> None:
-        """Start syncing in a background thread when Obsidian Sync is enabled."""
+        """Start syncing in a background thread when Obsidian Sync is enabled, until the final shutdown."""
         with self._lock:
-            if self._thread is not None and self._thread.is_alive():
+            if self._shut_down or (self._thread is not None and self._thread.is_alive()):
                 return
             self._last_error = None
             if not config.OBSIDIAN_SYNC_ENABLED:
@@ -180,18 +182,25 @@ class ObsidianSyncSupervisor:
         with self._lock:
             loop, task, thread = self._loop, self._task, self._thread
             self._loop = self._task = self._thread = None
-        if loop is None or task is None or thread is None:
-            return
-        try:
-            loop.call_soon_threadsafe(task.cancel)
-        except RuntimeError:
-            logger.debug("Obsidian Sync loop already finished")
-        thread.join()
+            if loop is None or task is None or thread is None:
+                return
+            try:
+                loop.call_soon_threadsafe(task.cancel)
+            except RuntimeError:
+                logger.debug("Obsidian Sync loop already finished")
+            thread.join()
 
     def restart(self) -> None:
         """Stop and start again so that changed settings take effect."""
-        self.stop()
-        self.start()
+        with self._lock:
+            self.stop()
+            self.start()
+
+    def shutdown(self) -> None:
+        """Stop syncing for good: a later start or restart does nothing."""
+        with self._lock:
+            self._shut_down = True
+            self.stop()
 
     async def login(self, email: str, password: str, mfa_code: str | None) -> str:
         """Sign in with `ob login`; the password is passed on stdin and is not kept."""
