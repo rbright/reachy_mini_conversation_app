@@ -175,6 +175,19 @@ def test_first_session_end_of_a_week_writes_last_weeks_memory(emma_vault: Path, 
     assert len(list((fixture_vault / "Emma/Weekly Memories").iterdir())) == 1
 
 
+def test_session_end_after_an_idle_week_writes_the_older_weeks_memory(emma_vault: Path, fixture_vault: Path) -> None:
+    """A week without sessions does not hide an earlier week that has logs but no memory yet."""
+    for start, said in ((datetime(2026, 9, 15, 10, 0), "Owls fly"), (datetime(2026, 9, 29, 9, 0), "Back again")):
+        session = VaultSession()
+        session.begin(emma_vault, now=start)
+        session.record("user", said)
+        session.end(emma_vault, now=start)
+
+    memories = list((fixture_vault / "Emma/Weekly Memories").iterdir())
+    assert [memory.name for memory in memories] == ["2026-09-18.md"]
+    assert "  - Owls fly" in memories[0].read_text(encoding="utf-8")
+
+
 def test_session_hooks_do_nothing_without_a_synced_vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """With sync off the session still runs and nothing is written."""
     monkeypatch.setattr(vault_session_mod, "current_vault_path", lambda: None)

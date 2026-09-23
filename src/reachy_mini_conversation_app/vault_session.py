@@ -31,6 +31,8 @@ AGENTS_FILENAME = "AGENTS.md"
 _WEEKLY_EXCERPT_TURNS = 3
 _WEEKLY_EXCERPT_CHARS = 200
 _WEEKLY_MAX_LOGS = 200
+# How far back a session end looks for finished weeks without a memory, for a robot that was off for a while.
+_WEEKLY_LOOKBACK_WEEKS = 8
 _USER_LABEL = "User"
 _HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$", re.MULTILINE)
 
@@ -166,7 +168,7 @@ class VaultSession:
             self.turns.append((role, text))
 
     def end(self, instance_path: str | Path | None, now: datetime | None = None) -> None:
-        """Write the session log and, once per ISO week, last week's memory; then close the session."""
+        """Write the session log and the weekly memory of each finished week that has none; then close the session."""
         if self.started_at is None:
             return
         try:
@@ -174,7 +176,7 @@ class VaultSession:
                 active = active_vault(instance_path, self.profile)
                 ended_at = now or datetime.now().astimezone()
                 self._write_session_log(active)
-                self._write_weekly_memory(active, ended_at)
+                self._write_weekly_memories(active, ended_at)
         except (VaultError, OSError) as exc:
             logger.warning("Vault session note not written: %s", exc)
         finally:
@@ -226,58 +228,77 @@ class VaultSession:
         )
         logger.info("Wrote vault session log %s", path)
 
-    def _write_weekly_memory(self, active: ActiveVault, ended_at: datetime) -> None:
+    def _write_weekly_memories(self, active: ActiveVault, ended_at: datetime) -> None:
         target = active.access.weekly_memory
         source = active.access.session_log
         if target is None or source is None:
             return
         today = ended_at.date()
-        week_start = today - timedelta(days=today.weekday() + 7)
-        week_end = week_start + timedelta(days=6)
+        this_week = today - timedelta(days=today.weekday())
         rule = load_schema(active.root).types.get(target.type)
         if rule is None:
             raise VaultError(f"weekly memory type `{target.type}` is not in the vault schema")
-        values = {
-            **_calendar_values(week_start + timedelta(days=target.date_weekday - 1)),
-            "week_start": week_start.isoformat(),
-            "week_end": week_end.isoformat(),
-            "time": f"{ended_at:%H%M}",
-        }
-        values |= {"slug": values["week"].lower(), "title": values["week"]}
-        path = f"{target.folder}/{fill_placeholders(rule.name or '{week}', values)}.md"
-        if note_path(active.root, path).exists():
+        # Newest first, back to the latest week with a memory: the session end that wrote it summarized all before.
+        missing: list[tuple[date, str, dict[str, str]]] = []
+        for weeks_back in range(1, _WEEKLY_LOOKBACK_WEEKS + 1):
+            week_start = this_week - timedelta(weeks=weeks_back)
+            values = {
+                **_calendar_values(week_start + timedelta(days=target.date_weekday - 1)),
+                "week_start": week_start.isoformat(),
+                "week_end": (week_start + timedelta(days=6)).isoformat(),
+                "time": f"{ended_at:%H%M}",
+            }
+            values |= {"slug": values["week"].lower(), "title": values["week"]}
+            path = f"{target.folder}/{fill_placeholders(rule.name or '{week}', values)}.md"
+            if note_path(active.root, path).exists():
+                break
+            missing.append((week_start, path, values))
+        if not missing:
             return
-        logs, _truncated = query_notes(
+        logs, truncated = query_notes(
             active.root,
             agent=active.access.agent,
             folders=active.access.read,
             folder=source.folder,
             where={"type": source.type},
-            created_from=week_start,
-            created_to=week_end,
-            limit=_WEEKLY_MAX_LOGS,
+            created_from=missing[-1][0],
+            created_to=this_week - timedelta(days=1),
+            limit=_WEEKLY_MAX_LOGS * len(missing),
         )
-        if not logs:
-            logger.info("No session logs for week %s; weekly memory skipped", values["week"])
-            return
-        lines = [f"# {active.profile} weekly memory {values['week']} (week of {week_start.isoformat()})", ""]
-        prefix = f"**{_USER_LABEL}:** "
+        if truncated:
+            logger.warning("More than %d session logs; weekly memories list the first ones only", len(logs))
+        logs_by_week: dict[date, list[str]] = {}
         for log in logs:
-            note = read_note(active.root, log.path, agent=active.access.agent, folders=active.access.read)
-            said = [line.removeprefix(prefix) for line in note.body.splitlines() if line.startswith(prefix)]
-            lines.append(f"- [[{log.path.removesuffix('.md')}]] ({len(said)} user turns)")
-            lines += [f"  - {text[:_WEEKLY_EXCERPT_CHARS]}" for text in said[:_WEEKLY_EXCERPT_TURNS]]
-        write_note(
-            active.root,
-            path,
-            agent=active.access.agent,
-            folders=active.access.write,
-            run=self.run_id(active.access.agent),
-            properties={
-                "type": target.type,
-                **{key: fill_placeholders(v, values) for key, v in target.properties.items()},
-            },
-            body="\n".join(lines) + "\n",
-            today=today,
-        )
-        logger.info("Wrote vault weekly memory %s", path)
+            # The created range filter passes only `YYYY-MM-DD` text, but that text can still be an invalid date.
+            try:
+                created = date.fromisoformat(str(log.properties["created"]))
+            except ValueError:
+                logger.warning("Skipping session log %s: `created` is not a valid date", log.path)
+                continue
+            logs_by_week.setdefault(created - timedelta(days=created.weekday()), []).append(log.path)
+        prefix = f"**{_USER_LABEL}:** "
+        for week_start, path, values in reversed(missing):
+            log_paths = logs_by_week.get(week_start)
+            if not log_paths:
+                logger.info("No session logs for week %s; weekly memory skipped", values["week"])
+                continue
+            lines = [f"# {active.profile} weekly memory {values['week']} (week of {week_start.isoformat()})", ""]
+            for log_path in log_paths:
+                note = read_note(active.root, log_path, agent=active.access.agent, folders=active.access.read)
+                said = [line.removeprefix(prefix) for line in note.body.splitlines() if line.startswith(prefix)]
+                lines.append(f"- [[{log_path.removesuffix('.md')}]] ({len(said)} user turns)")
+                lines += [f"  - {text[:_WEEKLY_EXCERPT_CHARS]}" for text in said[:_WEEKLY_EXCERPT_TURNS]]
+            write_note(
+                active.root,
+                path,
+                agent=active.access.agent,
+                folders=active.access.write,
+                run=self.run_id(active.access.agent),
+                properties={
+                    "type": target.type,
+                    **{key: fill_placeholders(v, values) for key, v in target.properties.items()},
+                },
+                body="\n".join(lines) + "\n",
+                today=today,
+            )
+            logger.info("Wrote vault weekly memory %s", path)
