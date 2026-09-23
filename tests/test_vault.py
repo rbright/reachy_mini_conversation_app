@@ -174,6 +174,19 @@ def test_read_and_query_respect_both_allowlists(fixture_vault: Path) -> None:
     assert truncated is False
 
 
+def test_query_skips_and_logs_notes_that_cannot_be_read(fixture_vault: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """A note that vault_read would refuse is not listed, and the skip is logged with its path."""
+    research = fixture_vault / "Emma/Research"
+    (research / "bad-yaml.md").write_text("---\ntype: [research\n---\nText.\n", encoding="utf-8")
+    (research / "bad-bytes.md").write_bytes(b"---\ntype: research\ncreated: 2026-09-05\n---\n\xff\xfe\n")
+
+    notes, _truncated = query_notes(fixture_vault, agent="emma", folders=READ, where={"type": "research"})
+
+    assert [summary.path for summary in notes] == ["Emma/Research/approved-topic.md", "Emma/Research/draft-topic.md"]
+    assert "Skipping vault note Emma/Research/bad-yaml.md" in caplog.text
+    assert "Skipping vault note Emma/Research/bad-bytes.md" in caplog.text
+
+
 def test_schema_needs_exactly_one_valid_block() -> None:
     """A schema note without one valid block is a clear error."""
     with pytest.raises(SchemaError, match="exactly one"):

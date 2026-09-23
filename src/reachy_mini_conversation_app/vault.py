@@ -3,6 +3,7 @@
 import os
 import re
 import json
+import logging
 import tempfile
 from typing import Literal
 from pathlib import Path
@@ -13,6 +14,8 @@ from collections.abc import Mapping, Sequence
 import yaml
 from pydantic import Field, BaseModel, JsonValue, ConfigDict, ValidationError, field_validator, model_validator
 
+
+logger = logging.getLogger(__name__)
 
 SCHEMA_PATH = "System/Schema.md"
 SYSTEM_FOLDER = "System"
@@ -397,8 +400,9 @@ def query_notes(
             ):
                 continue
             try:
-                frontmatter, _body = parse_note(file_path.read_text(encoding="utf-8", errors="replace"))
-            except VaultError:
+                frontmatter, _body = parse_note(file_path.read_text(encoding="utf-8"))
+            except (VaultError, OSError, UnicodeDecodeError) as exc:
+                logger.warning("Skipping vault note %s: %s", path, exc)
                 continue
             properties = {key: _json(value) for key, value in (frontmatter or {}).items()}
             created = properties.get("created")
