@@ -46,6 +46,11 @@ class _ObResult:
                 return lines[-1]
         return f"exit code {self.returncode}"
 
+    @property
+    def not_signed_in(self) -> bool:
+        """Return whether `ob` reports that no account is signed in."""
+        return _NOT_SIGNED_IN_MARKER in self.stderr + self.stdout
+
 
 def configured_vault_path() -> Path | None:
     """Return the configured local vault path; the default is `<instance>/obsidian/<vault>`."""
@@ -230,7 +235,7 @@ class ObsidianSyncSupervisor:
         """Return the remote vaults (`id`, `name`, `region`) of the signed-in account."""
         result = await _run_ob(_require_executable(), ["sync-list-remote", "--json"])
         if result.returncode != 0:
-            if _NOT_SIGNED_IN_MARKER in result.stderr + result.stdout:
+            if result.not_signed_in:
                 self._signed_in = False
                 raise ObsidianSyncError("Not signed in to Obsidian.")
             raise ObsidianSyncError(f"Listing vaults failed: {result.message}")
@@ -255,10 +260,11 @@ class ObsidianSyncSupervisor:
             loop.close()
 
     async def _supervise(self) -> None:
-        executable = shutil.which(config.OBSIDIAN_HEADLESS_BIN)
-        if executable is None:
+        try:
+            executable = _require_executable()
+        except ObsidianSyncError as error:
             self._state = "stopped"
-            self._last_error = f"Obsidian Headless ({config.OBSIDIAN_HEADLESS_BIN}) is not installed."
+            self._last_error = str(error)
             logger.warning("%s Obsidian Sync is off; the conversation is not affected.", self._last_error)
             return
         vault = config.OBSIDIAN_SYNC_VAULT
@@ -320,7 +326,7 @@ class ObsidianSyncSupervisor:
                 secrets=secrets,
             )
             if setup.returncode != 0:
-                if _NOT_SIGNED_IN_MARKER in setup.stderr + setup.stdout:
+                if setup.not_signed_in:
                     self._signed_in = False
                 raise ObsidianSyncError(f"ob sync-setup failed: {setup.message}")
             self._signed_in = True
