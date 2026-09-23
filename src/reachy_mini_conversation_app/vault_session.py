@@ -21,7 +21,11 @@ from reachy_mini_conversation_app.vault import (
 from reachy_mini_conversation_app.config import config
 from reachy_mini_conversation_app.obsidian_sync import current_vault_path
 from reachy_mini_conversation_app.profile_store import canonical_profile_name
-from reachy_mini_conversation_app.profile_vault_access import ProfileVaultAccess, read_profile_vault_access
+from reachy_mini_conversation_app.profile_vault_access import (
+    SessionNoteTarget,
+    ProfileVaultAccess,
+    read_profile_vault_access,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -211,14 +215,41 @@ class VaultSession:
             self.context = ""
             self.turns = []
 
+    def _target_path(self, active: ActiveVault, target: SessionNoteTarget, values: dict[str, str], name: str) -> str:
+        rule = active.vault.schema.types.get(target.type)
+        if rule is None:
+            raise VaultError(f"note type `{target.type}` is not in the vault schema")
+        return f"{target.folder}/{fill_placeholders(rule.name or name, values)}.md"
+
+    def _write_target(
+        self,
+        active: ActiveVault,
+        target: SessionNoteTarget,
+        path: str,
+        values: dict[str, str],
+        lines: list[str],
+        today: date,
+    ) -> None:
+        write_note(
+            active.vault,
+            path,
+            agent=active.access.agent,
+            folders=active.access.write,
+            run=self.run_id(active.access.agent),
+            properties={
+                "type": target.type,
+                **{key: fill_placeholders(template, values) for key, template in target.properties.items()},
+            },
+            body="\n".join(lines) + "\n",
+            today=today,
+        )
+        logger.info("Wrote vault %s note %s", target.type, path)
+
     def _write_session_log(self, active: ActiveVault) -> None:
         target = active.access.session_log
         if target is None or self.started_at is None:
             logger.info("No session log target for personality %s", active.profile)
             return
-        rule = active.vault.schema.types.get(target.type)
-        if rule is None:
-            raise VaultError(f"session log type `{target.type}` is not in the vault schema")
         started = self.started_at
         # The session id suffix keeps two sessions in one minute apart; a log is never overwritten.
         suffix = self.session_id.rsplit("-", 1)[-1]
@@ -228,7 +259,7 @@ class VaultSession:
             "slug": f"{started:%H%M}-{suffix}",
             "title": f"{started:%Y-%m-%d %H%M} {suffix}",
         }
-        path = f"{target.folder}/{fill_placeholders(rule.name or '{date}-{slug}', values)}.md"
+        path = self._target_path(active, target, values, "{date}-{slug}")
         lines = [f"# {active.profile} session {started:%Y-%m-%d %H:%M}", ""]
         size = 0
         for role, text in self.turns:
@@ -238,20 +269,7 @@ class VaultSession:
                 lines.append("_Transcript truncated._")
                 break
             lines.append(line)
-        write_note(
-            active.vault,
-            path,
-            agent=active.access.agent,
-            folders=active.access.write,
-            run=self.run_id(active.access.agent),
-            properties={
-                "type": target.type,
-                **{key: fill_placeholders(v, values) for key, v in target.properties.items()},
-            },
-            body="\n".join(lines) + "\n",
-            today=started.date(),
-        )
-        logger.info("Wrote vault session log %s", path)
+        self._write_target(active, target, path, values, lines, started.date())
 
     def _write_weekly_memories(self, active: ActiveVault, ended_at: datetime) -> None:
         target = active.access.weekly_memory
@@ -260,9 +278,6 @@ class VaultSession:
             return
         today = ended_at.date()
         this_week = today - timedelta(days=today.weekday())
-        rule = active.vault.schema.types.get(target.type)
-        if rule is None:
-            raise VaultError(f"weekly memory type `{target.type}` is not in the vault schema")
         # Newest first, back to the latest week with a memory: the session end that wrote it summarized all before.
         missing: list[tuple[date, str, dict[str, str]]] = []
         for weeks_back in range(1, _WEEKLY_LOOKBACK_WEEKS + 1):
@@ -274,7 +289,7 @@ class VaultSession:
                 "time": f"{ended_at:%H%M}",
             }
             values |= {"slug": values["week"].lower(), "title": values["week"]}
-            path = f"{target.folder}/{fill_placeholders(rule.name or '{week}', values)}.md"
+            path = self._target_path(active, target, values, "{week}")
             if note_path(active.vault.root, path).exists():
                 break
             missing.append((week_start, path, values))
@@ -313,17 +328,4 @@ class VaultSession:
                 said = [line.removeprefix(prefix) for line in note.body.splitlines() if line.startswith(prefix)]
                 lines.append(f"- [[{log_path.removesuffix('.md')}]] ({len(said)} user turns)")
                 lines += [f"  - {text[:_WEEKLY_EXCERPT_CHARS]}" for text in said[:_WEEKLY_EXCERPT_TURNS]]
-            write_note(
-                active.vault,
-                path,
-                agent=active.access.agent,
-                folders=active.access.write,
-                run=self.run_id(active.access.agent),
-                properties={
-                    "type": target.type,
-                    **{key: fill_placeholders(v, values) for key, v in target.properties.items()},
-                },
-                body="\n".join(lines) + "\n",
-                today=today,
-            )
-            logger.info("Wrote vault weekly memory %s", path)
+            self._write_target(active, target, path, values, lines, today)
