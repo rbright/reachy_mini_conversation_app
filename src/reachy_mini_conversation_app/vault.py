@@ -54,7 +54,7 @@ _SCHEMA_BLOCK = re.compile(r"^```yaml vault-schema[ \t]*\r?\n(.*?)^```[ \t]*\r?$
 _FRONTMATTER = re.compile(r"\A---[ \t]*\r?\n(.*?)(?:\r?\n)?^---[ \t]*(?:\r?\n|\Z)", re.MULTILINE | re.DOTALL)
 _FRONTMATTER_START = re.compile(r"---[ \t]*\r?\n")
 PLACEHOLDER = re.compile(r"\{([a-z_]+)\}")
-_NAME_PLACEHOLDERS = frozenset({"date", "slug", "title", "week", "month", "year", "quarter", "time"})
+NAME_PLACEHOLDERS = frozenset({"date", "slug", "title", "week", "month", "year", "quarter", "time"})
 # Obvious credentials only. A match refuses the write; the message names the pattern, never the text.
 _CREDENTIALS = (
     ("private-key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
@@ -139,7 +139,7 @@ class TypeRule(_SchemaModel):
     @field_validator("name")
     @classmethod
     def _known_placeholders(cls, name: str | None) -> str | None:
-        unknown = set(PLACEHOLDER.findall(name or "")) - _NAME_PLACEHOLDERS
+        unknown = set(PLACEHOLDER.findall(name or "")) - NAME_PLACEHOLDERS
         if unknown:
             raise ValueError(f"unknown name placeholders: {sorted(unknown)}")
         return name

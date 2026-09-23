@@ -55,7 +55,8 @@ export function buildProfileVaultAccessSection({ signal } = {}) {
       "p",
       { class: "settings-hint settings-section-intro" },
       "Folders each personality may read and write in the synced vault with the vault tools; . is the vault root. " +
-        "The vault's System/Schema.md must also allow them. Placeholders: {date} {time} {week} {week_start} {week_end}."
+        "The vault's System/Schema.md must also allow them. Property placeholders: {date} {time} {slug} {title} " +
+        "{week} {month} {year} {quarter}; weekly memory also {week_start} {week_end}."
     ),
     form
   );

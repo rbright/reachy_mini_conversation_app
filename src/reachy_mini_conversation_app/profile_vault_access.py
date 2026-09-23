@@ -4,11 +4,12 @@ import os
 import json
 import logging
 import threading
+from typing import ClassVar
 from pathlib import Path
 
 from pydantic import Field, BaseModel, ConfigDict, ValidationError, field_validator
 
-from reachy_mini_conversation_app.vault import AGENT_ID, Folders, normalize_folder
+from reachy_mini_conversation_app.vault import AGENT_ID, PLACEHOLDER, NAME_PLACEHOLDERS, Folders, normalize_folder
 from reachy_mini_conversation_app.profile_store import canonical_profile_name
 from reachy_mini_conversation_app.profile_toolsets import get_profile_toolsets_path
 
@@ -27,6 +28,9 @@ class _AccessModel(BaseModel):
 class SessionNoteTarget(_AccessModel):
     """Where the session end hook writes one note: folder, schema type, and property templates."""
 
+    # The placeholders that the session end hook fills for this note.
+    placeholders: ClassVar[frozenset[str]] = NAME_PLACEHOLDERS
+
     folder: str = Field(min_length=1)
     type: str = Field(min_length=1)
     properties: dict[str, str] = Field(default_factory=dict)
@@ -36,9 +40,20 @@ class SessionNoteTarget(_AccessModel):
     def _normalize_folder(cls, folder: str) -> str:
         return normalize_folder(folder)
 
+    @field_validator("properties")
+    @classmethod
+    def _known_placeholders(cls, properties: dict[str, str]) -> dict[str, str]:
+        for key, template in properties.items():
+            unknown = sorted(set(PLACEHOLDER.findall(template)) - cls.placeholders)
+            if unknown:
+                raise ValueError(f"`{key}` uses unknown placeholders: {', '.join(f'{{{name}}}' for name in unknown)}")
+        return properties
+
 
 class WeeklyMemoryTarget(SessionNoteTarget):
     """Weekly memory target; `date_weekday` picks the ISO weekday of the summarized week used for `{date}`."""
+
+    placeholders: ClassVar[frozenset[str]] = NAME_PLACEHOLDERS | {"week_start", "week_end"}
 
     date_weekday: int = Field(default=1, ge=1, le=7)
 
