@@ -1,8 +1,14 @@
 """Tests for app-level runtime behavior."""
 
+import os
+import sys
+import textwrap
 import threading
+import subprocess
 from types import SimpleNamespace
 from unittest.mock import MagicMock
+
+import pytest
 
 import reachy_mini_conversation_app.main as main_mod
 
@@ -64,3 +70,31 @@ def test_standalone_ui_uses_stable_writable_instance_path(tmp_path, monkeypatch)
 
     assert paths == [tmp_path / "reachy_mini_conversation_app"] * 2
     assert previous_contents == [None, "BACKEND_PROVIDER=openai\n"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX signals")
+def test_sigterm_takes_the_orderly_sigint_shutdown_path() -> None:
+    """SIGTERM cancels the running event loop like SIGINT, so shutdown `finally` blocks still run."""
+    script = textwrap.dedent(
+        """
+        import os, signal, asyncio
+        from reachy_mini_conversation_app.main import _handle_sigterm_as_sigint
+
+        async def runner():
+            try:
+                os.kill(os.getpid(), signal.SIGTERM)
+                await asyncio.sleep(10)
+            finally:
+                print("session flushed", flush=True)
+
+        _handle_sigterm_as_sigint()
+        try:
+            asyncio.run(runner())
+        except KeyboardInterrupt:
+            print("interrupted", flush=True)
+        """
+    )
+
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=30)
+
+    assert result.stdout.split() == ["session", "flushed", "interrupted"], result.stderr

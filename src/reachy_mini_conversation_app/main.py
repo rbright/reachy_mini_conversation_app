@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+import signal
 import asyncio
 import logging
 import argparse
@@ -93,6 +94,11 @@ def _start_inactivity_timeout_thread(
     thread = threading.Thread(target=poll_inactivity_timeout, daemon=True)
     thread.start()
     return thread
+
+
+def _handle_sigterm_as_sigint() -> None:
+    """Route SIGTERM to the SIGINT handler, so that a service stop takes the orderly shutdown path."""
+    signal.signal(signal.SIGTERM, lambda _signum, _frame: signal.raise_signal(signal.SIGINT))
 
 
 def main() -> None:
@@ -403,6 +409,9 @@ def run(
         threading.Thread(target=poll_stop_event, daemon=True).start()
 
     # Started here, right before the try block, so that every exit path stops the `ob sync` child process.
+    # Only the main thread can set signal handlers; the daemon stops apps with SIGINT, systemd with SIGTERM.
+    if threading.current_thread() is threading.main_thread():
+        _handle_sigterm_as_sigint()
     obsidian_sync.supervisor.start()
     try:
         stream_manager.launch()
