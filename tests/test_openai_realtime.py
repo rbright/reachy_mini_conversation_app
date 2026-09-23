@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+import reachy_mini_conversation_app.vault_session as vault_session_mod
 import reachy_mini_conversation_app.openai_realtime as openai_mod
 import reachy_mini_conversation_app.huggingface_realtime as realtime_mod
 from reachy_mini_conversation_app.config import OPENAI_DEFAULT_VOICE, config
@@ -96,6 +97,33 @@ async def test_openai_session_uses_direct_model_audio_and_tools(monkeypatch: pyt
     assert session["audio"]["output"]["format"] == {"type": "audio/pcm", "rate": 24000}
     assert session["audio"]["output"]["voice"] == OPENAI_DEFAULT_VOICE
     assert session["tools"][0]["name"] == "camera"
+
+
+@pytest.mark.asyncio
+async def test_vault_context_is_appended_once_per_wake_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reconnects reuse the session's vault context; a new session after the end reloads it."""
+    loads: list[object] = []
+    monkeypatch.setattr(vault_session_mod, "active_vault", lambda _instance_path: "vault")
+    monkeypatch.setattr(
+        vault_session_mod, "build_session_context", lambda active: loads.append(active) or f"Vault notes {len(loads)}"
+    )
+    monkeypatch.setattr(realtime_mod, "get_tool_specs", lambda: [])
+    monkeypatch.setattr(realtime_mod, "get_session_instructions", lambda _instance_path=None: "Be concise.")
+    monkeypatch.setattr(realtime_mod, "get_session_greeting_prompt", lambda: "")
+    captured_update: dict[str, Any] = {}
+    handler = _handler()
+    handler.client = _FakeRealtimeClient({}, captured_update)  # type: ignore[assignment]
+    monkeypatch.setattr(type(handler.tool_manager), "start_up", MagicMock())
+    monkeypatch.setattr(type(handler.tool_manager), "shutdown", AsyncMock())
+
+    await handler._run_realtime_session()
+    await handler._run_realtime_session()
+    assert captured_update["session"]["instructions"] == "Be concise.\n\nVault notes 1"
+    assert len(loads) == 1
+
+    handler.deps.vault_session.end(None)
+    await handler._run_realtime_session()
+    assert captured_update["session"]["instructions"] == "Be concise.\n\nVault notes 2"
 
 
 @pytest.mark.asyncio

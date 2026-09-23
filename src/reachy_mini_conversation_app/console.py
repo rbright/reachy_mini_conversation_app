@@ -343,6 +343,7 @@ class LocalStream:
         """Close the active conversation and move the robot to sleep."""
         try:
             await self._shutdown_active_handler()
+            await asyncio.to_thread(self.handler.deps.vault_session.end, self._instance_path)
             if self._on_sleep_phrase is not None:
                 try:
                     await asyncio.to_thread(self._on_sleep_phrase)
@@ -1119,6 +1120,8 @@ class LocalStream:
             finally:
                 # Ensure handler connection is closed
                 await self.handler.shutdown()
+                # App stop and shutdown end the wake session; write its note before Obsidian Sync stops.
+                await asyncio.to_thread(self.handler.deps.vault_session.end, self._instance_path)
 
         asyncio.run(runner())
 
