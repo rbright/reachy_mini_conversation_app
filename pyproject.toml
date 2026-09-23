@@ -20,6 +20,9 @@ dependencies = [
     #Audio resampling between Reachy Mini and OpenAI Realtime
     "scipy",
 
+    #Obsidian note frontmatter and vault schema
+    "pyyaml",
+
     #OpenAI (used by the Hugging Face backend)
     "openai==2.28.0",
 
