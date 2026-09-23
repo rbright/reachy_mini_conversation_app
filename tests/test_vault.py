@@ -148,6 +148,44 @@ def test_write_validates_against_schema(
     assert not (fixture_vault / path).exists()
 
 
+TASKS = (*WRITE, "Emma/Tasks", "Emma/Sources")
+
+
+def test_records_are_written_only_by_their_owner(fixture_vault: Path) -> None:
+    """A new record gets the writing agent as owner; a foreign owner or another agent's record is refused."""
+    assert _write(fixture_vault, "Emma/Tasks/Mine.md", {"type": "task", "state": "open"}, folders=TASKS) is True
+    properties, _body = parse_note((fixture_vault / "Emma/Tasks/Mine.md").read_text(encoding="utf-8"))
+    assert properties is not None and properties["owner"] == "agent/emma" and properties["updated"] == TODAY
+    assert _write(fixture_vault, "Emma/Tasks/Mine.md", {"state": "done"}, "Done.\n", folders=TASKS) is False
+
+    with pytest.raises(RefusedError, match="must have `owner: agent/emma`"):
+        _write(
+            fixture_vault, "Emma/Tasks/New.md", {"type": "task", "state": "open", "owner": "agent/mira"}, folders=TASKS
+        )
+    assert not (fixture_vault / "Emma/Tasks/New.md").exists()
+
+    theirs = fixture_vault / "Emma/Tasks/Theirs.md"
+    theirs.write_text("---\ntype: task\ncreated: 2026-09-01\nstate: open\nowner: agent/mira\n---\nMira's.\n")
+    before = theirs.read_text(encoding="utf-8")
+    with pytest.raises(RefusedError, match="only the record owner"):
+        _write(fixture_vault, "Emma/Tasks/Theirs.md", {"state": "done"}, folders=TASKS)
+    assert theirs.read_text(encoding="utf-8") == before
+
+
+def test_reference_notes_are_never_written(fixture_vault: Path) -> None:
+    """Agents neither create nor update reference notes, even in a folder they may write."""
+    with pytest.raises(RefusedError, match="never write reference"):
+        _write(fixture_vault, "Emma/Sources/New.md", {"type": "source"}, folders=TASKS)
+    assert not (fixture_vault / "Emma/Sources/New.md").exists()
+
+    book = fixture_vault / "Emma/Sources/Book.md"
+    book.parent.mkdir(parents=True)
+    book.write_text("---\ntype: source\ncreated: 2026-09-01\n---\nA book.\n", encoding="utf-8")
+    with pytest.raises(RefusedError, match="never write reference"):
+        _write(fixture_vault, "Emma/Sources/Book.md", {}, "Changed.\n", folders=TASKS)
+    assert book.read_text(encoding="utf-8").endswith("A book.\n")
+
+
 @pytest.mark.parametrize(
     ("body", "pattern", "secret"),
     [
@@ -182,6 +220,14 @@ def test_read_and_query_respect_both_allowlists(fixture_vault: Path) -> None:
     )
     assert [summary.path for summary in notes] == ["Emma/Research/draft-topic.md"]
     assert truncated is False
+
+
+def test_query_reports_truncation_at_the_limit(fixture_vault: Path) -> None:
+    """More matches than `limit` return the first `limit` matches and a truncation flag."""
+    notes, truncated = query_notes(fixture_vault, agent="emma", folders=READ, where={"type": "research"}, limit=1)
+
+    assert [summary.path for summary in notes] == ["Emma/Research/approved-topic.md"]
+    assert truncated is True
 
 
 def test_query_skips_and_logs_notes_that_cannot_be_read(fixture_vault: Path, caplog: pytest.LogCaptureFixture) -> None:

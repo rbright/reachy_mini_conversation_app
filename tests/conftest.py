@@ -45,10 +45,12 @@ types:
   emma-memory: {class: log, folders: [Emma/Weekly Memories], name: "{date}", required: [date, week_of]}
   emma-playbook: {class: log, folders: [Emma/Conversation Playbook], name: "Conversation Playbook - {date}"}
   research: {class: artifact, folders: [Emma/Research], name: "{slug}", values: {confidence: [low, high]}}
+  task: {class: record, folders: [Emma/Tasks], name: "{title}"}
+  source: {class: reference, folders: [Emma/Sources], name: "{title}"}
 agents:
   emma:
     read: [".", Emma/Conversation Playbook, Emma/Sessions, Emma/Weekly Memories, Emma/Research, Private]
-    write: [Emma/Sessions, Emma/Weekly Memories, Emma/Research, Private]
+    write: [Emma/Sessions, Emma/Weekly Memories, Emma/Research, Emma/Tasks, Emma/Sources, Private]
 ```
 """
 
