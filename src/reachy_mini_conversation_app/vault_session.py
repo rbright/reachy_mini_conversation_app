@@ -227,8 +227,10 @@ class VaultSession:
     transcript_chars: int = 0
     transcript_truncated: bool = False
     user_spoke: bool = False
-    # Clear during a vault settings change, so that no session begins before the change is done.
+    # Clear during vault settings changes, so that no session begins before they are done.
     _begin_allowed: threading.Event = field(default_factory=threading.Event, init=False, repr=False, compare=False)
+    _vault_changes: int = field(default=0, init=False, repr=False, compare=False)
+    _vault_changes_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
     _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -237,12 +239,17 @@ class VaultSession:
 
     @contextmanager
     def vault_change(self) -> Iterator[None]:
-        """Hold back `begin()` until the vault settings change is done."""
-        self._begin_allowed.clear()
+        """Hold back `begin()` until this and every overlapping vault settings change are done."""
+        with self._vault_changes_lock:
+            self._vault_changes += 1
+            self._begin_allowed.clear()
         try:
             yield
         finally:
-            self._begin_allowed.set()
+            with self._vault_changes_lock:
+                self._vault_changes -= 1
+                if not self._vault_changes:
+                    self._begin_allowed.set()
 
     def begin(self, instance_path: str | Path | None, now: datetime | None = None) -> None:
         """Start the session and load its vault context, unless it already runs for the active profile.

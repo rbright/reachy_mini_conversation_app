@@ -321,16 +321,21 @@ def test_session_start_waits_for_the_vault_link_check(
     assert "Ask about the dinosaur book." in session.context
 
 
-def test_session_start_waits_for_a_vault_change_to_finish(emma_vault: Path) -> None:
-    """A connection that begins during a vault change starts its session only after the change is done."""
+def test_session_start_waits_for_every_vault_change_to_finish(emma_vault: Path) -> None:
+    """A connection that begins during vault changes starts its session only after the last change is done."""
     session = VaultSession()
     connection = threading.Thread(target=session.begin, args=(emma_vault,))
-    with session.vault_change():
-        connection.start()
-        connection.join(timeout=0.2)
-        assert connection.is_alive()
-        assert session.started_at is None
+    first, second = session.vault_change(), session.vault_change()
+    first.__enter__()
+    second.__enter__()
+    connection.start()
 
+    first.__exit__(None, None, None)
+    connection.join(timeout=0.2)
+    assert connection.is_alive()
+    assert session.started_at is None
+
+    second.__exit__(None, None, None)
     connection.join(timeout=5.0)
     assert session.started_at is not None
 
