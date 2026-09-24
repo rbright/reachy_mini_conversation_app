@@ -943,12 +943,11 @@ class LocalStream:
                     and Path(texts["path"]).expanduser() != Path(config.OBSIDIAN_SYNC_PATH or "").expanduser()
                 )
             )
-            reconnect = vault_changed and self._can_rebuild_handler()
             vault_session = self.handler.deps.vault_session
             with vault_session.vault_change() if vault_changed else contextlib.nullcontext():
-                if reconnect:
-                    await self.request_backend_restart("obsidian_vault_changed", rebuild=False)
                 if vault_changed:
+                    # Without a rebuild, the stream loop reconnects the same handler after its retry delay.
+                    await self.request_backend_restart("obsidian_vault_changed", rebuild=False)
                     await asyncio.to_thread(vault_session.end, self._instance_path)
 
                 if cleared:
@@ -959,7 +958,7 @@ class LocalStream:
                     refresh_runtime_config_from_env()
                 self._persist_env_values(updates)
                 await asyncio.to_thread(obsidian_sync.supervisor.restart)
-            if reconnect:
+            if vault_changed and self._can_rebuild_handler():
                 await self.request_backend_restart("obsidian_vault_changed")
             return {"ok": True, "message": "Obsidian Sync settings saved.", **obsidian_sync.supervisor.status()}
 

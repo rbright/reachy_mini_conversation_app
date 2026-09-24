@@ -227,29 +227,24 @@ class VaultSession:
     transcript_chars: int = 0
     transcript_truncated: bool = False
     user_spoke: bool = False
-    # Clear during vault settings changes, so that no session begins before they are done.
-    _begin_allowed: threading.Event = field(default_factory=threading.Event, init=False, repr=False, compare=False)
+    # Running vault settings changes; no session begins before they are done.
     _vault_changes: int = field(default=0, init=False, repr=False, compare=False)
-    _vault_changes_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
+    _vault_changes_done: threading.Condition = field(
+        default_factory=threading.Condition, init=False, repr=False, compare=False
+    )
     _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False, compare=False)
-
-    def __post_init__(self) -> None:
-        """Allow `begin()`."""
-        self._begin_allowed.set()
 
     @contextmanager
     def vault_change(self) -> Iterator[None]:
         """Hold back `begin()` until this and every overlapping vault settings change are done."""
-        with self._vault_changes_lock:
+        with self._vault_changes_done:
             self._vault_changes += 1
-            self._begin_allowed.clear()
         try:
             yield
         finally:
-            with self._vault_changes_lock:
+            with self._vault_changes_done:
                 self._vault_changes -= 1
-                if not self._vault_changes:
-                    self._begin_allowed.set()
+                self._vault_changes_done.notify_all()
 
     def begin(self, instance_path: str | Path | None, now: datetime | None = None) -> None:
         """Start the session and load its vault context, unless it already runs for the active profile.
@@ -259,29 +254,28 @@ class VaultSession:
         the vault is now available.
         """
         while True:
-            self._begin_allowed.wait()
+            with self._vault_changes_done:
+                self._vault_changes_done.wait_for(lambda: not self._vault_changes)
             # At app start and after a vault change, `ob` confirms the vault link a few seconds after the connection.
             obsidian_sync.supervisor.wait_for_link_check(VAULT_LINK_WAIT_SECONDS)
             with self._lock:
-                if self._begin_allowed.is_set():
-                    self._begin(instance_path, now)
-                    return
-
-    def _begin(self, instance_path: str | Path | None, now: datetime | None) -> None:
-        profile = canonical_profile_name(config.REACHY_MINI_CUSTOM_PROFILE)
-        if self.started_at is not None:
-            if self.profile == profile:
-                tools_changed = _has_vault_tools(profile, instance_path) != self.vault_tools
-                if tools_changed or (not self.context and current_vault_path() is not None):
-                    self._load_context(instance_path)
+                if self._vault_changes:
+                    continue
+                profile = canonical_profile_name(config.REACHY_MINI_CUSTOM_PROFILE)
+                if self.started_at is not None:
+                    if self.profile == profile:
+                        tools_changed = _has_vault_tools(profile, instance_path) != self.vault_tools
+                        if tools_changed or (not self.context and current_vault_path() is not None):
+                            self._load_context(instance_path)
+                        return
+                    # A profile change ends the old profile's session, so its turns stay in its own vault notes.
+                    self.end(instance_path, now)
+                self.started_at = now or datetime.now().astimezone()
+                self.session_id = f"{self.started_at:%Y%m%dT%H%M%S}-{uuid.uuid4().hex[:6]}"
+                self.profile = profile
+                self._clear_transcript()
+                self._load_context(instance_path)
                 return
-            # A profile change ends the old profile's session, so its turns stay in its own vault notes.
-            self.end(instance_path, now)
-        self.started_at = now or datetime.now().astimezone()
-        self.session_id = f"{self.started_at:%Y%m%dT%H%M%S}-{uuid.uuid4().hex[:6]}"
-        self.profile = profile
-        self._clear_transcript()
-        self._load_context(instance_path)
 
     def _clear_transcript(self) -> None:
         self.turns = []

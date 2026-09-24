@@ -1803,10 +1803,11 @@ def test_obsidian_configure_blank_settings_restore_their_defaults(
         assert name not in persisted
 
 
+@pytest.mark.parametrize("rebuildable", [True, False])
 def test_obsidian_vault_change_stops_the_backend_then_ends_the_session_in_the_old_vault(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    rebuildable: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A vault change holds back session starts until the old session ended and the new settings apply."""
+    """A vault change stops the backend and holds back session starts until it is done; then it rebuilds if it can."""
     for name in _OBSIDIAN_CONFIG_NAMES:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(config, "OBSIDIAN_HEADLESS_BIN", str(tmp_path / "missing-ob"))
@@ -1821,7 +1822,11 @@ def test_obsidian_vault_change_stops_the_backend_then_ends_the_session_in_the_ol
     held.__exit__.side_effect = lambda *_exc: events.append(f"release in {config.OBSIDIAN_SYNC_VAULT}")
     app = FastAPI()
     stream = LocalStream(
-        handler, _rpc_robot(), settings_app=app, instance_path=str(tmp_path), handler_factory=MagicMock()
+        handler,
+        _rpc_robot(),
+        settings_app=app,
+        instance_path=str(tmp_path),
+        handler_factory=MagicMock() if rebuildable else None,
     )
     monkeypatch.setattr(
         stream,
@@ -1835,8 +1840,9 @@ def test_obsidian_vault_change_stops_the_backend_then_ends_the_session_in_the_ol
     _rpc_call(app, "obsidian.configure", {"path": "~"})
     _rpc_call(app, "obsidian.configure", {"vault": "Shared"})
 
+    rebuild = ("rebuild",) if rebuildable else ()
     assert events == [
-        *("hold", "stop", "end in Demo", "release in Demo", "rebuild"),
-        *("hold", "stop", "end in Demo", "release in Shared", "rebuild"),
+        *("hold", "stop", "end in Demo", "release in Demo", *rebuild),
+        *("hold", "stop", "end in Demo", "release in Shared", *rebuild),
     ]
     assert config.OBSIDIAN_SYNC_VAULT == "Shared"
