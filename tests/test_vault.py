@@ -20,9 +20,9 @@ from reachy_mini_conversation_app.vault import (
 )
 
 
-READ = ("Emma/Conversation Playbook", "Emma/Sessions", "Emma/Weekly Memories", "Emma/Research")
-WRITE = ("Emma/Sessions", "Emma/Weekly Memories", "Emma/Research")
-RUN = "reachy:emma:20260923T140500-abc123"
+READ = ("Tutor/Conversation Playbook", "Tutor/Sessions", "Tutor/Weekly Memories", "Tutor/Research")
+WRITE = ("Tutor/Sessions", "Tutor/Weekly Memories", "Tutor/Research")
+RUN = "reachy:tutor:20260923T140500-abc123"
 TODAY = date(2026, 9, 23)
 
 
@@ -32,7 +32,7 @@ def _write(
     properties: dict[str, object],
     body: str = "Body.\n",
     *,
-    agent: str = "emma",
+    agent: str = "tutor",
     folders: tuple[str, ...] = WRITE,
 ) -> bool:
     return write_note(
@@ -42,44 +42,44 @@ def _write(
 
 def test_write_creates_contract_note_atomically(fixture_vault: Path) -> None:
     """A new log gets tool-set keys, keeps key order, and leaves no temporary file."""
-    path = "Emma/Sessions/2026-09-23-1405.md"
+    path = "Tutor/Sessions/2026-09-23-1405.md"
 
-    created = _write(fixture_vault, path, {"type": "emma-session", "date": "2026-09-23"}, "Hello.\n")
+    created = _write(fixture_vault, path, {"type": "tutor-session", "date": "2026-09-23"}, "Hello.\n")
 
     assert created is True
     text = (fixture_vault / path).read_text(encoding="utf-8")
     properties, body = parse_note(text)
     assert properties == {
-        "type": "emma-session",
+        "type": "tutor-session",
         "date": date(2026, 9, 23),
         "created": TODAY,
-        "author": "agent/emma",
+        "author": "agent/tutor",
         "run": RUN,
         "updated": TODAY,
     }
     assert body == "Hello.\n"
-    assert os.listdir(fixture_vault / "Emma" / "Sessions") == ["2026-09-23-1405.md"]
+    assert os.listdir(fixture_vault / "Tutor" / "Sessions") == ["2026-09-23-1405.md"]
 
 
 def test_write_refuses_folders_outside_either_allowlist(fixture_vault: Path) -> None:
     """The store and the vault schema must both allow a folder."""
     with pytest.raises(RefusedError, match="cannot write"):
-        _write(fixture_vault, "Private/note.md", {"type": "emma-session", "date": "2026-09-23"})
+        _write(fixture_vault, "Private/note.md", {"type": "tutor-session", "date": "2026-09-23"})
     with pytest.raises(RefusedError, match="cannot write"):
         _write(
             fixture_vault,
-            "Emma/Conversation Playbook/Conversation Playbook - 2026-09-23.md",
-            {"type": "emma-playbook"},
-            folders=(*WRITE, "Emma/Conversation Playbook"),
+            "Tutor/Conversation Playbook/Conversation Playbook - 2026-09-23.md",
+            {"type": "tutor-playbook"},
+            folders=(*WRITE, "Tutor/Conversation Playbook"),
         )
     with pytest.raises(RefusedError, match="not in the schema `agents`"):
-        _write(fixture_vault, "Emma/Sessions/x.md", {"type": "emma-session", "date": "2026-09-23"}, agent="mira")
+        _write(fixture_vault, "Tutor/Sessions/x.md", {"type": "tutor-session", "date": "2026-09-23"}, agent="planner")
 
 
 def test_write_refuses_system_folder_even_when_allowed(fixture_vault: Path) -> None:
     """No agent writes System/, whatever the store says."""
     with pytest.raises(RefusedError, match="System"):
-        _write(fixture_vault, "System/Notes.md", {"type": "emma-session"}, folders=("*",))
+        _write(fixture_vault, "System/Notes.md", {"type": "tutor-session"}, folders=("*",))
 
 
 def test_write_refuses_system_folder_in_any_letter_case(fixture_vault: Path) -> None:
@@ -88,7 +88,7 @@ def test_write_refuses_system_folder_in_any_letter_case(fixture_vault: Path) -> 
     text = schema.read_text(encoding="utf-8").replace(
         "types:\n", "types:\n  anywhere: {class: artifact, folders: ['*']}\n"
     )
-    schema.write_text(text.replace("write: [Emma/Sessions,", "write: ['*', Emma/Sessions,"), encoding="utf-8")
+    schema.write_text(text.replace("write: [Tutor/Sessions,", "write: ['*', Tutor/Sessions,"), encoding="utf-8")
 
     for path in ("system/New.md", "SYSTEM/Notes/New.md"):
         with pytest.raises(RefusedError, match="System"):
@@ -108,52 +108,52 @@ def test_write_refuses_impossible_datetime_values(fixture_vault: Path) -> None:
     )
 
     with pytest.raises(RefusedError, match="`seen_at` must be of type datetime"):
-        _write(fixture_vault, "Emma/Research/bad-time.md", {"type": "research", "seen_at": "2026-99-99T25:61"})
-    assert not (fixture_vault / "Emma/Research/bad-time.md").exists()
-    assert _write(fixture_vault, "Emma/Research/good-time.md", {"type": "research", "seen_at": "2026-09-23T14:05"})
+        _write(fixture_vault, "Tutor/Research/bad-time.md", {"type": "research", "seen_at": "2026-99-99T25:61"})
+    assert not (fixture_vault / "Tutor/Research/bad-time.md").exists()
+    assert _write(fixture_vault, "Tutor/Research/good-time.md", {"type": "research", "seen_at": "2026-09-23T14:05"})
 
 
 @pytest.mark.parametrize(
     "path",
     [
         "../outside.md",
-        "Emma/Sessions/../../System/Schema.md",
-        "/Emma/Sessions/x.md",
-        "Emma/.hidden/x.md",
-        "Emma/Sessions/x.txt",
+        "Tutor/Sessions/../../System/Schema.md",
+        "/Tutor/Sessions/x.md",
+        "Tutor/.hidden/x.md",
+        "Tutor/Sessions/x.txt",
     ],
 )
 def test_write_refuses_traversal_and_non_markdown(fixture_vault: Path, path: str) -> None:
     """Traversal, absolute, hidden, and non-Markdown targets are refused."""
     with pytest.raises(RefusedError):
-        _write(fixture_vault, path, {"type": "emma-session", "date": "2026-09-23"})
+        _write(fixture_vault, path, {"type": "tutor-session", "date": "2026-09-23"})
 
 
 def test_write_refuses_symlink_that_leaves_the_vault(fixture_vault: Path, tmp_path: Path) -> None:
     """A symlinked folder cannot move a note out of the vault."""
     outside = tmp_path / "outside"
     outside.mkdir()
-    (fixture_vault / "Emma" / "Sessions").symlink_to(outside, target_is_directory=True)
+    (fixture_vault / "Tutor" / "Sessions").symlink_to(outside, target_is_directory=True)
 
     with pytest.raises(RefusedError, match="symbolic link"):
-        _write(fixture_vault, "Emma/Sessions/2026-09-23-1405.md", {"type": "emma-session", "date": "2026-09-23"})
+        _write(fixture_vault, "Tutor/Sessions/2026-09-23-1405.md", {"type": "tutor-session", "date": "2026-09-23"})
     assert list(outside.iterdir()) == []
 
 
 def test_write_refuses_locked_artifacts_and_existing_logs(fixture_vault: Path) -> None:
     """Approved artifacts and existing dated logs stay unchanged; draft artifacts can be updated."""
-    approved = fixture_vault / "Emma/Research/approved-topic.md"
+    approved = fixture_vault / "Tutor/Research/approved-topic.md"
     before = approved.read_text(encoding="utf-8")
     with pytest.raises(RefusedError, match="approved"):
-        _write(fixture_vault, "Emma/Research/approved-topic.md", {}, "Changed.\n")
+        _write(fixture_vault, "Tutor/Research/approved-topic.md", {}, "Changed.\n")
     assert approved.read_text(encoding="utf-8") == before
 
-    _write(fixture_vault, "Emma/Sessions/2026-09-23-1405.md", {"type": "emma-session", "date": "2026-09-23"})
+    _write(fixture_vault, "Tutor/Sessions/2026-09-23-1405.md", {"type": "tutor-session", "date": "2026-09-23"})
     with pytest.raises(RefusedError, match="dated note or a log"):
-        _write(fixture_vault, "Emma/Sessions/2026-09-23-1405.md", {"type": "emma-session", "date": "2026-09-23"})
+        _write(fixture_vault, "Tutor/Sessions/2026-09-23-1405.md", {"type": "tutor-session", "date": "2026-09-23"})
 
-    assert _write(fixture_vault, "Emma/Research/draft-topic.md", {"confidence": "high"}, "Better.\n") is False
-    properties, body = parse_note((fixture_vault / "Emma/Research/draft-topic.md").read_text(encoding="utf-8"))
+    assert _write(fixture_vault, "Tutor/Research/draft-topic.md", {"confidence": "high"}, "Better.\n") is False
+    properties, body = parse_note((fixture_vault / "Tutor/Research/draft-topic.md").read_text(encoding="utf-8"))
     assert properties is not None and properties["confidence"] == "high" and properties["run"] == RUN
     assert body == "Better.\n"
 
@@ -161,14 +161,18 @@ def test_write_refuses_locked_artifacts_and_existing_logs(fixture_vault: Path) -
 @pytest.mark.parametrize(
     ("path", "properties", "message"),
     [
-        ("Emma/Sessions/a.md", {"type": "unknown"}, "must name a type"),
-        ("Emma/Sessions/a.md", {"type": "research"}, "belong in"),
-        ("Emma/Sessions/a.md", {"type": "emma-session"}, "missing required key `date`"),
-        ("Emma/Sessions/a.md", {"type": "emma-session", "date": "soon"}, "must be of type date"),
-        ("Emma/Sessions/a.md", {"type": "emma-session", "date": "2026-09-23", "mood": "ok"}, "not in the schema keys"),
-        ("Emma/Research/a.md", {"type": "research", "confidence": "total"}, "must be one of"),
-        ("Emma/Research/a.md", {"type": "research", "status": "approved"}, "draft"),
-        ("Emma/Sessions/a.md", {"type": "emma-session", "run": "x"}, "set by the tool"),
+        ("Tutor/Sessions/a.md", {"type": "unknown"}, "must name a type"),
+        ("Tutor/Sessions/a.md", {"type": "research"}, "belong in"),
+        ("Tutor/Sessions/a.md", {"type": "tutor-session"}, "missing required key `date`"),
+        ("Tutor/Sessions/a.md", {"type": "tutor-session", "date": "soon"}, "must be of type date"),
+        (
+            "Tutor/Sessions/a.md",
+            {"type": "tutor-session", "date": "2026-09-23", "mood": "ok"},
+            "not in the schema keys",
+        ),
+        ("Tutor/Research/a.md", {"type": "research", "confidence": "total"}, "must be one of"),
+        ("Tutor/Research/a.md", {"type": "research", "status": "approved"}, "draft"),
+        ("Tutor/Sessions/a.md", {"type": "tutor-session", "run": "x"}, "set by the tool"),
     ],
 )
 def test_write_validates_against_schema(
@@ -180,41 +184,44 @@ def test_write_validates_against_schema(
     assert not (fixture_vault / path).exists()
 
 
-TASKS = (*WRITE, "Emma/Tasks", "Emma/Sources")
+TASKS = (*WRITE, "Tutor/Tasks", "Tutor/Sources")
 
 
 def test_records_are_written_only_by_their_owner(fixture_vault: Path) -> None:
     """A new record gets the writing agent as owner; a foreign owner or another agent's record is refused."""
-    assert _write(fixture_vault, "Emma/Tasks/Mine.md", {"type": "task", "state": "open"}, folders=TASKS) is True
-    properties, _body = parse_note((fixture_vault / "Emma/Tasks/Mine.md").read_text(encoding="utf-8"))
-    assert properties is not None and properties["owner"] == "agent/emma" and properties["updated"] == TODAY
-    assert _write(fixture_vault, "Emma/Tasks/Mine.md", {"state": "done"}, "Done.\n", folders=TASKS) is False
+    assert _write(fixture_vault, "Tutor/Tasks/Mine.md", {"type": "task", "state": "open"}, folders=TASKS) is True
+    properties, _body = parse_note((fixture_vault / "Tutor/Tasks/Mine.md").read_text(encoding="utf-8"))
+    assert properties is not None and properties["owner"] == "agent/tutor" and properties["updated"] == TODAY
+    assert _write(fixture_vault, "Tutor/Tasks/Mine.md", {"state": "done"}, "Done.\n", folders=TASKS) is False
 
-    with pytest.raises(RefusedError, match="must have `owner: agent/emma`"):
+    with pytest.raises(RefusedError, match="must have `owner: agent/tutor`"):
         _write(
-            fixture_vault, "Emma/Tasks/New.md", {"type": "task", "state": "open", "owner": "agent/mira"}, folders=TASKS
+            fixture_vault,
+            "Tutor/Tasks/New.md",
+            {"type": "task", "state": "open", "owner": "agent/planner"},
+            folders=TASKS,
         )
-    assert not (fixture_vault / "Emma/Tasks/New.md").exists()
+    assert not (fixture_vault / "Tutor/Tasks/New.md").exists()
 
-    theirs = fixture_vault / "Emma/Tasks/Theirs.md"
-    theirs.write_text("---\ntype: task\ncreated: 2026-09-01\nstate: open\nowner: agent/mira\n---\nMira's.\n")
+    theirs = fixture_vault / "Tutor/Tasks/Theirs.md"
+    theirs.write_text("---\ntype: task\ncreated: 2026-09-01\nstate: open\nowner: agent/planner\n---\nMira's.\n")
     before = theirs.read_text(encoding="utf-8")
     with pytest.raises(RefusedError, match="only the record owner"):
-        _write(fixture_vault, "Emma/Tasks/Theirs.md", {"state": "done"}, folders=TASKS)
+        _write(fixture_vault, "Tutor/Tasks/Theirs.md", {"state": "done"}, folders=TASKS)
     assert theirs.read_text(encoding="utf-8") == before
 
 
 def test_reference_notes_are_never_written(fixture_vault: Path) -> None:
     """Agents neither create nor update reference notes, even in a folder they may write."""
     with pytest.raises(RefusedError, match="never write reference"):
-        _write(fixture_vault, "Emma/Sources/New.md", {"type": "source"}, folders=TASKS)
-    assert not (fixture_vault / "Emma/Sources/New.md").exists()
+        _write(fixture_vault, "Tutor/Sources/New.md", {"type": "source"}, folders=TASKS)
+    assert not (fixture_vault / "Tutor/Sources/New.md").exists()
 
-    book = fixture_vault / "Emma/Sources/Book.md"
+    book = fixture_vault / "Tutor/Sources/Book.md"
     book.parent.mkdir(parents=True)
     book.write_text("---\ntype: source\ncreated: 2026-09-01\n---\nA book.\n", encoding="utf-8")
     with pytest.raises(RefusedError, match="never write reference"):
-        _write(fixture_vault, "Emma/Sources/Book.md", {}, "Changed.\n", folders=TASKS)
+        _write(fixture_vault, "Tutor/Sources/Book.md", {}, "Changed.\n", folders=TASKS)
     assert book.read_text(encoding="utf-8").endswith("A book.\n")
 
 
@@ -232,83 +239,85 @@ def test_reference_notes_are_never_written(fixture_vault: Path) -> None:
 def test_write_refuses_credential_content(fixture_vault: Path, body: str, pattern: str, secret: str) -> None:
     """Credential-like text is refused and the message names the pattern, never the text."""
     with pytest.raises(RefusedError, match=f"credential pattern \\({pattern}\\)") as error:
-        _write(fixture_vault, "Emma/Sessions/a.md", {"type": "emma-session", "date": "2026-09-23"}, body)
+        _write(fixture_vault, "Tutor/Sessions/a.md", {"type": "tutor-session", "date": "2026-09-23"}, body)
     assert secret not in str(error.value)
-    assert not (fixture_vault / "Emma/Sessions/a.md").exists()
+    assert not (fixture_vault / "Tutor/Sessions/a.md").exists()
 
 
 def test_read_and_query_respect_both_allowlists(fixture_vault: Path) -> None:
     """Reads need store and schema access; queries filter by properties and created range."""
-    note = read_note(open_vault(fixture_vault), "Emma/Conversation Playbook/Current.md", agent="emma", folders=READ)
-    assert note.properties == {"type": "emma-playbook", "created": "2026-09-19"}
+    note = read_note(open_vault(fixture_vault), "Tutor/Conversation Playbook/Current.md", agent="tutor", folders=READ)
+    assert note.properties == {"type": "tutor-playbook", "created": "2026-09-19"}
     assert note.body == "Ask about the dinosaur book.\n"
     with pytest.raises(RefusedError):
-        read_note(open_vault(fixture_vault), "System/Schema.md", agent="emma", folders=("*",))
+        read_note(open_vault(fixture_vault), "System/Schema.md", agent="tutor", folders=("*",))
     with pytest.raises(RefusedError):
-        read_note(open_vault(fixture_vault), "Emma/Research/draft-topic.md", agent="emma", folders=("Emma/Sessions",))
+        read_note(
+            open_vault(fixture_vault), "Tutor/Research/draft-topic.md", agent="tutor", folders=("Tutor/Sessions",)
+        )
 
     notes, truncated = query_notes(
         open_vault(fixture_vault),
-        agent="emma",
+        agent="tutor",
         folders=READ,
         where={"type": "research"},
         created_from=date(2026, 9, 2),
     )
-    assert [summary.path for summary in notes] == ["Emma/Research/draft-topic.md"]
+    assert [summary.path for summary in notes] == ["Tutor/Research/draft-topic.md"]
     assert truncated is False
 
 
 def test_query_reports_truncation_at_the_limit(fixture_vault: Path) -> None:
     """More matches than `limit` return the first `limit` matches and a truncation flag."""
     notes, truncated = query_notes(
-        open_vault(fixture_vault), agent="emma", folders=READ, where={"type": "research"}, limit=1
+        open_vault(fixture_vault), agent="tutor", folders=READ, where={"type": "research"}, limit=1
     )
 
-    assert [summary.path for summary in notes] == ["Emma/Research/approved-topic.md"]
+    assert [summary.path for summary in notes] == ["Tutor/Research/approved-topic.md"]
     assert truncated is True
 
 
 def test_query_skips_and_logs_notes_that_cannot_be_read(fixture_vault: Path, caplog: pytest.LogCaptureFixture) -> None:
     """A note that vault_read would refuse is not listed, and the skip is logged with its path."""
-    research = fixture_vault / "Emma/Research"
+    research = fixture_vault / "Tutor/Research"
     (research / "bad-yaml.md").write_text("---\ntype: [research\n---\nText.\n", encoding="utf-8")
     (research / "bad-bytes.md").write_bytes(b"---\ntype: research\ncreated: 2026-09-05\n---\n\xff\xfe\n")
 
-    notes, _truncated = query_notes(open_vault(fixture_vault), agent="emma", folders=READ, where={"type": "research"})
+    notes, _truncated = query_notes(open_vault(fixture_vault), agent="tutor", folders=READ, where={"type": "research"})
 
-    assert [summary.path for summary in notes] == ["Emma/Research/approved-topic.md", "Emma/Research/draft-topic.md"]
-    assert "Skipping vault note Emma/Research/bad-yaml.md" in caplog.text
-    assert "Skipping vault note Emma/Research/bad-bytes.md" in caplog.text
+    assert [summary.path for summary in notes] == ["Tutor/Research/approved-topic.md", "Tutor/Research/draft-topic.md"]
+    assert "Skipping vault note Tutor/Research/bad-yaml.md" in caplog.text
+    assert "Skipping vault note Tutor/Research/bad-bytes.md" in caplog.text
 
 
 def test_reads_and_queries_load_only_a_bounded_prefix(fixture_vault: Path) -> None:
     """A large synced note does not load into memory: reads return a capped body, queries only frontmatter."""
-    large = fixture_vault / "Emma/Research/large.md"
+    large = fixture_vault / "Tutor/Research/large.md"
     large.write_text("---\ntype: research\ncreated: 2026-09-10\n---\n" + "x" * (8 * 1024 * 1024), encoding="utf-8")
     vault = open_vault(fixture_vault)
 
     tracemalloc.start()
     try:
-        note = read_note(vault, "Emma/Research/large.md", agent="emma", folders=READ)
-        notes, _truncated = query_notes(vault, agent="emma", folders=READ, where={"type": "research"})
+        note = read_note(vault, "Tutor/Research/large.md", agent="tutor", folders=READ)
+        notes, _truncated = query_notes(vault, agent="tutor", folders=READ, where={"type": "research"})
         _current, peak = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
 
     assert note.truncated is True
     assert len(note.body) == READ_BODY_MAX_CHARS
-    assert "Emma/Research/large.md" in [summary.path for summary in notes]
+    assert "Tutor/Research/large.md" in [summary.path for summary in notes]
     assert peak < 1024 * 1024
 
 
 def test_read_refuses_frontmatter_over_the_cap(fixture_vault: Path) -> None:
     """Frontmatter that does not close within the cap is an error, not a whole-file read."""
-    (fixture_vault / "Emma/Research/long-yaml.md").write_text(
+    (fixture_vault / "Tutor/Research/long-yaml.md").write_text(
         "---\ntype: research\n" + "# filler\n" * (FRONTMATTER_MAX_CHARS // 9 + 1) + "---\nBody.\n", encoding="utf-8"
     )
 
     with pytest.raises(VaultError, match="frontmatter is longer"):
-        read_note(open_vault(fixture_vault), "Emma/Research/long-yaml.md", agent="emma", folders=READ)
+        read_note(open_vault(fixture_vault), "Tutor/Research/long-yaml.md", agent="tutor", folders=READ)
 
 
 def test_schema_needs_exactly_one_valid_block() -> None:
@@ -319,7 +328,7 @@ def test_schema_needs_exactly_one_valid_block() -> None:
         with pytest.raises(SchemaError, match="System/"):
             parse_schema(
                 "```yaml vault-schema\nversion: 1\nvault: V\nkeys: {}\ntypes: {}\n"
-                f"agents: {{emma: {{write: [{folder}]}}}}\n```\n"
+                f"agents: {{tutor: {{write: [{folder}]}}}}\n```\n"
             )
 
 
@@ -334,4 +343,4 @@ def test_schema_that_is_not_utf8_is_a_schema_error(fixture_vault: Path) -> None:
 def test_read_missing_note_is_an_error(fixture_vault: Path) -> None:
     """A missing note is a VaultError, not a crash."""
     with pytest.raises(VaultError, match="not found"):
-        read_note(open_vault(fixture_vault), "Emma/Sessions/none.md", agent="emma", folders=READ)
+        read_note(open_vault(fixture_vault), "Tutor/Sessions/none.md", agent="tutor", folders=READ)

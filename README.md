@@ -209,15 +209,15 @@ The `vault_read`, `vault_query`, and `vault_write` tools use the synced vault. T
 {
   "version": 1,
   "profiles": {
-    "Emma": {
-      "agent": "emma",
-      "read": [".", "Emma/Conversation Playbook", "Emma/Sessions", "Emma/Weekly Memories"],
-      "write": ["Emma/Sessions", "Emma/Weekly Memories"],
-      "session_context": ["Emma/Conversation Playbook/Current.md"],
-      "session_log": {"folder": "Emma/Sessions", "type": "emma-session", "properties": {"date": "{date}"}},
+    "Tutor": {
+      "agent": "tutor",
+      "read": [".", "Tutor/Conversation Playbook", "Tutor/Sessions", "Tutor/Weekly Memories"],
+      "write": ["Tutor/Sessions", "Tutor/Weekly Memories"],
+      "session_context": ["Tutor/Conversation Playbook/Current.md"],
+      "session_log": {"folder": "Tutor/Sessions", "type": "tutor-session", "properties": {"date": "{date}"}},
       "weekly_memory": {
-        "folder": "Emma/Weekly Memories",
-        "type": "emma-memory",
+        "folder": "Tutor/Weekly Memories",
+        "type": "tutor-memory",
         "date_weekday": 5,
         "properties": {"date": "{date}", "week_of": "{week_start}"}
       }

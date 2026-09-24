@@ -1095,20 +1095,20 @@ async def test_sleep_phrase_writes_the_session_note(
 ) -> None:
     """The sleep phrase ends the wake session and writes its vault note before the robot sleeps."""
     monkeypatch.setattr(vault_session_mod, "current_vault_path", lambda: fixture_vault)
-    monkeypatch.setattr(config, "REACHY_MINI_CUSTOM_PROFILE", "Emma")
+    monkeypatch.setattr(config, "REACHY_MINI_CUSTOM_PROFILE", "Tutor")
     access = ProfileVaultAccess(
-        agent="emma",
-        read=("Emma/Sessions",),
-        write=("Emma/Sessions",),
-        session_log=SessionNoteTarget(folder="Emma/Sessions", type="emma-session", properties={"date": "{date}"}),
+        agent="tutor",
+        read=("Tutor/Sessions",),
+        write=("Tutor/Sessions",),
+        session_log=SessionNoteTarget(folder="Tutor/Sessions", type="tutor-session", properties={"date": "{date}"}),
     )
-    write_profile_vault_access("Emma", access, tmp_path)
+    write_profile_vault_access("Tutor", access, tmp_path)
     handler = MagicMock()
     handler.output_queue = asyncio.Queue()
     handler.deps.vault_session = VaultSession()
     handler.deps.vault_session.begin(tmp_path)
     handler.deps.vault_session.record("user", "Tell me about owls")
-    sessions = fixture_vault / "Emma" / "Sessions"
+    sessions = fixture_vault / "Tutor" / "Sessions"
     notes_when_sleeping: list[list[Path]] = []
     stream = LocalStream(
         handler,
