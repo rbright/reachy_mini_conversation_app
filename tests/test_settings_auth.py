@@ -89,12 +89,12 @@ def client(clock: Clock, seen: list[dict[str, Any]]) -> TestClient:
     app = FastAPI()
     rpc = SettingsRpcServer(SettingsPinGuard(persist, clock=clock))
 
-    @rpc.method("backend.config")  # type: ignore[untyped-decorator]
+    @rpc.method("backend.config")
     def _privileged(params: dict[str, Any]) -> dict[str, object]:
         seen.append(params)
         return {"ok": True}
 
-    @rpc.method("conversation.status")  # type: ignore[untyped-decorator]
+    @rpc.method("conversation.status")
     def _open(_params: dict[str, Any]) -> dict[str, object]:
         return {"ok": True}
 
@@ -102,7 +102,7 @@ def client(clock: Clock, seen: list[dict[str, Any]]) -> TestClient:
     return TestClient(app)
 
 
-@pytest.mark.parametrize("origin", ["http://evil.example", "http://testserver:8000", "null"])
+@pytest.mark.parametrize("origin", ["http://evil.example", "http://testserver:8000", "https://testserver", "null"])
 def test_upgrade_from_another_origin_is_refused(client: TestClient, origin: str) -> None:
     """A browser page on another origin cannot open `/rpc`."""
     with pytest.raises(WebSocketDisconnect) as refused:
@@ -178,14 +178,14 @@ def test_first_pin_is_set_once(client: TestClient, seen: list[dict[str, Any]]) -
     assert len(seen) == 1
 
 
-def _settings_app(tmp_path: Path) -> FastAPI:
+def _settings_app(instance_path: Path | None) -> FastAPI:
     """Return the conversation app settings server."""
     app = FastAPI()
     stream = LocalStream(
         MagicMock(),
         SimpleNamespace(media=SimpleNamespace(audio=None, backend=None)),
         settings_app=app,
-        instance_path=str(tmp_path),
+        instance_path=str(instance_path) if instance_path is not None else None,
     )
     stream._init_settings_ui_if_needed()
     return app
@@ -213,3 +213,12 @@ def test_settings_app_stores_only_a_pin_hash_and_accepts_the_pin(tmp_path: Path)
     assert stored is not None and stored.startswith("scrypt:") and PIN not in stored
     response = _call(client, "profile_vault_access.get", {"profile": "default", "settings_pin": PIN})
     assert "result" in response
+
+
+def test_settings_app_refuses_a_pin_it_cannot_save() -> None:
+    """Without an instance `.env` to keep the hash, setting a PIN fails and leaves no PIN in memory."""
+    client = TestClient(_settings_app(None))
+
+    assert _reason(_call(client, "settings.set_pin", {"pin": PIN})) == "settings_pin_not_saved"
+    assert SETTINGS_PIN_HASH_ENV not in os.environ
+    assert _reason(_call(client, "backend.config", {"settings_pin": PIN})) == "settings_pin_not_set"

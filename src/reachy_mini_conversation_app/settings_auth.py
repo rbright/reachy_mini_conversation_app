@@ -3,15 +3,14 @@
 Two checks protect the endpoint:
 
 - The WebSocket upgrade is refused when the request has an `Origin` header that is not the app's own
-  origin (same host and port). A browser always sends `Origin`, so another site cannot drive `/rpc`.
+  origin (same scheme, host, and port). A browser always sends `Origin`, so another site cannot drive `/rpc`.
   Clients that are not browsers (the daemon relay) send no `Origin` and stay accepted.
-- A privileged settings method (secrets, Obsidian account and vault access, backend and tool configuration)
-  runs only when the call carries the settings PIN in `settings_pin`. The app keeps only a scrypt hash of
-  the PIN, in the instance `.env`. When no PIN is set, privileged methods are refused and the first
-  `settings.set_pin` call sets it. To reset a PIN, remove its `.env` line and restart the app.
+- A privileged settings method (secrets, Obsidian account and vault access, backend, personality, and tool
+  configuration) runs only when the call carries the settings PIN in `settings_pin`. The app keeps only a
+  scrypt hash of the PIN, in the instance `.env`. When no PIN is set, privileged methods are refused and the
+  first `settings.set_pin` call sets it. To reset a PIN, remove its `.env` line and restart the app.
 """
 
-from __future__ import annotations
 import os
 import hmac
 import time
@@ -20,11 +19,14 @@ import hashlib
 import inspect
 import logging
 import secrets
-from typing import Any
+from typing import Any, TypeVar
 from urllib.parse import urlsplit
 from collections.abc import Callable
 
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI
+from starlette.types import Send, Scope, Receive
+from starlette.routing import WebSocketRoute
+from starlette.datastructures import Headers
 
 from reachy_mini.io.jsonrpc import JsonRpcError
 from reachy_mini.apps.jsonrpc_server import JsonRpcServer
@@ -45,6 +47,7 @@ PRIVILEGED_METHODS = frozenset(
         "obsidian.list_vaults",
         "obsidian.configure",
         "obsidian.logout",
+        "personalities.save",
         "profile_vault_access.get",
         "profile_vault_access.save",
         "profile_tools.save",
@@ -57,6 +60,10 @@ PRIVILEGED_METHODS = frozenset(
 _SCRYPT_N = 2**14
 _SCRYPT_R = 8
 _SCRYPT_P = 1
+
+# The SDK hands a handler the request params as a JSON object.
+RpcHandler = Callable[[dict[str, Any]], Any]
+HandlerT = TypeVar("HandlerT", bound=Callable[..., Any])
 
 
 def hash_settings_pin(pin: str) -> str:
@@ -79,13 +86,14 @@ def _pin_matches(pin: str, stored: str) -> bool:
     return hmac.compare_digest(digest, expected)
 
 
-def is_allowed_origin(origin: str | None, host: str | None) -> bool:
-    """Return whether a WebSocket upgrade with this `Origin` and `Host` may connect."""
+def is_allowed_origin(origin: str | None, host: str | None, secure: bool) -> bool:
+    """Return whether a WebSocket upgrade with this `Origin` may connect to the app at `host`."""
     if origin is None:
         return True
     if not host:
         return False
-    return urlsplit(origin).netloc.lower() == host.lower()
+    parts = urlsplit(origin)
+    return parts.scheme.lower() == ("https" if secure else "http") and parts.netloc.lower() == host.lower()
 
 
 class SettingsPinGuard:
@@ -96,7 +104,7 @@ class SettingsPinGuard:
         persist_env: Callable[[dict[str, str]], None],
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        """Keep the PIN hash with `persist_env` (the instance `.env` writer)."""
+        """Keep the PIN hash with `persist_env`, which raises `OSError` when it cannot save the values."""
         self._persist_env = persist_env
         self._clock = clock
         self._failures = 0
@@ -142,11 +150,17 @@ class SettingsPinGuard:
         async with self._lock:
             if self._stored_hash():
                 raise JsonRpcError("a settings PIN is already set", reason="settings_pin_already_set")
-            self._persist_env({SETTINGS_PIN_HASH_ENV: await asyncio.to_thread(hash_settings_pin, pin)})
+            try:
+                self._persist_env({SETTINGS_PIN_HASH_ENV: await asyncio.to_thread(hash_settings_pin, pin)})
+            except OSError as exc:
+                # A PIN that a restart would drop lets the next client claim a new one.
+                os.environ.pop(SETTINGS_PIN_HASH_ENV, None)
+                logger.warning("Settings PIN not saved: %s", exc)
+                raise JsonRpcError("could not save the settings PIN", reason="settings_pin_not_saved") from None
         logger.info("Settings PIN set")
         return {"ok": True}
 
-    def protect(self, handler: Callable[[dict[str, Any]], Any]) -> Callable[[dict[str, Any]], Any]:
+    def protect(self, handler: RpcHandler) -> RpcHandler:
         """Return `handler` behind a PIN check; the handler never sees the PIN."""
 
         async def _guarded(params: dict[str, Any]) -> Any:
@@ -159,27 +173,51 @@ class SettingsPinGuard:
         return _guarded
 
 
-class SettingsRpcServer(JsonRpcServer):  # type: ignore[misc]  # the SDK is not typed
+class _OriginCheckedRpc:
+    """ASGI app for `/rpc` that refuses cross-origin upgrades and passes the rest to the SDK server app."""
+
+    def __init__(self, rpc_app: FastAPI) -> None:
+        self._rpc_app = rpc_app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        headers = Headers(scope=scope)
+        origin = headers.get("origin")
+        if not is_allowed_origin(origin, headers.get("host"), scope.get("scheme") == "wss"):
+            logger.warning("Refused /rpc connection from origin %r", origin)
+            await send({"type": "websocket.close", "code": 1008, "reason": ""})
+            return
+        await self._rpc_app(scope, receive, send)
+
+
+class SettingsRpcServer:
     """The SDK JSON-RPC server with the origin check and the settings PIN on privileged methods."""
 
     def __init__(self, guard: SettingsPinGuard) -> None:
         """Register `settings.set_pin` and protect every privileged method registered later."""
-        super().__init__()
+        self._server = JsonRpcServer()
         self._guard = guard
-        self.register("settings.set_pin", guard.set_pin)
+        self._server.register("settings.set_pin", guard.set_pin)
 
-    def register(self, name: str, handler: Callable[[dict[str, Any]], Any]) -> None:
+    def register(self, name: str, handler: RpcHandler) -> None:
         """Register a handler; a privileged method gets the PIN check."""
-        super().register(name, self._guard.protect(handler) if name in PRIVILEGED_METHODS else handler)
+        self._server.register(name, self._guard.protect(handler) if name in PRIVILEGED_METHODS else handler)
+
+    def method(self, name: str) -> Callable[[HandlerT], HandlerT]:
+        """Register the decorated handler as `name`."""
+
+        def _register(handler: HandlerT) -> HandlerT:
+            self.register(name, handler)
+            return handler
+
+        return _register
+
+    def broadcast_threadsafe(self, method: str, params: dict[str, Any] | None = None) -> None:
+        """Push a notification to every connected client from any thread."""
+        self._server.broadcast_threadsafe(method, params)
 
     def mount(self, app: FastAPI, path: str = "/rpc") -> None:
-        """Add the `/rpc` WebSocket route, refusing upgrades from another origin."""
-
-        @app.websocket(path)
-        async def _rpc_ws(websocket: WebSocket) -> None:
-            origin = websocket.headers.get("origin")
-            if not is_allowed_origin(origin, websocket.headers.get("host")):
-                logger.warning("Refused /rpc connection from origin %r", origin)
-                await websocket.close(code=1008)
-                return
-            await self._serve(websocket)
+        """Add the `/rpc` WebSocket route to `app`, refusing upgrades from another origin."""
+        # The SDK mounts its route on its own app; the origin check runs before that app sees the connection.
+        rpc_app = FastAPI()
+        self._server.mount(rpc_app, path)
+        app.router.routes.append(WebSocketRoute(path, _OriginCheckedRpc(rpc_app)))

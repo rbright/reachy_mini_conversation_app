@@ -248,6 +248,7 @@ const ERROR_MESSAGES = Object.freeze({
   settings_pin_locked: "Too many wrong PINs. Wait one minute, then try again.",
   settings_pin_already_set: "A settings PIN is already set. Enter it to continue.",
   settings_pin_too_short: "Use a settings PIN of 6 or more characters.",
+  settings_pin_not_saved: "The robot could not save the settings PIN. Check the app folder, then try again.",
 });
 
 /** Map a thrown error to user-facing copy, falling back to its raw message. */

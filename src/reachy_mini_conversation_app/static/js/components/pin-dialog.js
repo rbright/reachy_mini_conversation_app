@@ -1,5 +1,5 @@
 /** Settings PIN dialog. Privileged settings calls (secrets, Obsidian, vault access, backend and tool
- * configuration) need the PIN; the first one on a robot without a PIN creates it.
+ * configuration, personality saves) need the PIN; the first one on a robot without a PIN creates it.
  * Resolves the PIN, or null when the user cancels. */
 
 import { h } from "../ui.js";
@@ -24,7 +24,7 @@ export function askSettingsPin({ create = false, retry = false } = {}) {
         })
       );
     const subtitle = create
-      ? `Choose a settings PIN of ${MIN_SETTINGS_PIN_LENGTH} or more characters. The robot asks for it before it changes secrets, Obsidian, vault access, backend, or tool settings. To reset it, remove REACHY_MINI_SETTINGS_PIN_HASH from the app .env file and restart the app.`
+      ? `Choose a settings PIN of ${MIN_SETTINGS_PIN_LENGTH} or more characters. The robot asks for it before it changes secrets, Obsidian, vault access, backend, personality, or tool settings. To reset it, remove REACHY_MINI_SETTINGS_PIN_HASH from the app .env file and restart the app.`
       : "Enter the settings PIN to change this setting.";
     const errorBox = h("p", { class: "modal__error", role: "alert", "aria-live": "polite" });
     const form = h(

@@ -27,6 +27,7 @@ from reachy_mini_conversation_app.profile_store import (
     normalize_tool_names,
     canonical_profile_name,
 )
+from reachy_mini_conversation_app.settings_auth import SettingsRpcServer
 from reachy_mini_conversation_app.profile_toolsets import (
     read_profile_tool_override,
 )
@@ -351,7 +352,7 @@ def build_personality_ops(
     )
 
 
-def register_personality_methods(rpc: JsonRpcServer, ops: PersonalityOps) -> None:
+def register_personality_methods(rpc: JsonRpcServer | SettingsRpcServer, ops: PersonalityOps) -> None:
     """Register personality and voice operations as JSON-RPC methods."""
 
     def _wrap(operation: Callable[[dict[str, Any]], Any]) -> Callable[[dict[str, Any]], Any]:

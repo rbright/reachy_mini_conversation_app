@@ -181,9 +181,9 @@ In the web UI's Settings view, select Hugging Face or OpenAI Realtime. Hugging F
 
 ### Settings PIN
 
-The web UI talks to the app over the `/rpc` WebSocket on port 7860. The app refuses a WebSocket upgrade whose `Origin` header is not the app's own origin, so a page on another site cannot use `/rpc`.
+The web UI talks to the app over the `/rpc` WebSocket on port 7860. The app refuses a WebSocket upgrade whose `Origin` header is not the app's own origin (scheme, host, and port), so a page on another site cannot use `/rpc`.
 
-Settings that change secrets, the Obsidian account, vault access, the backend, or tools need the settings PIN. The first time you change one of them, the UI asks you to set a PIN of 6 or more characters. After that, it asks for the PIN once per page load. The app stores only a scrypt hash in the instance `.env`. After 5 wrong PINs, the app refuses all PINs for 60 seconds. You cannot change the PIN in the UI: remove `REACHY_MINI_SETTINGS_PIN_HASH` from the instance `.env`, restart the app, and set a new PIN.
+Settings that change secrets, the Obsidian account, vault access, the backend, personality definitions, or tools need the settings PIN. The first time you change one of them, the UI asks you to set a PIN of 6 or more characters. After that, it asks for the PIN once per page load. The app stores only a scrypt hash in the instance `.env`. After 5 wrong PINs, the app refuses all PINs for 60 seconds. You cannot change the PIN in the UI: remove `REACHY_MINI_SETTINGS_PIN_HASH` from the instance `.env`, restart the app, and set a new PIN.
 
 Until you set a PIN, the app refuses these settings. The first client to set the PIN owns it, so set it soon after you install or update the app.
 
