@@ -88,7 +88,6 @@ def _require_executable() -> str:
 
 
 async def _spawn_ob(executable: str, args: list[str], *, stdin: int, stderr: int) -> asyncio.subprocess.Process:
-    """Start one `ob` process with its stdout piped; a spawn failure is an `ObsidianSyncError`."""
     try:
         return await asyncio.create_subprocess_exec(
             executable, *args, stdin=stdin, stdout=asyncio.subprocess.PIPE, stderr=stderr

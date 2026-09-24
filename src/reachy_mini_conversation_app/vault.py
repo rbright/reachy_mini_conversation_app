@@ -124,7 +124,6 @@ def covers_folder(folders: Sequence[str], folder: str) -> bool:
 
 
 def _in_system_folder(path: str) -> bool:
-    """Return whether a vault-relative path is in `System/`, in any letter case."""
     # Case-insensitive file systems (macOS, Windows) resolve `system/` to the `System/` folder.
     return path.split("/", 1)[0].casefold() == SYSTEM_FOLDER.casefold()
 
