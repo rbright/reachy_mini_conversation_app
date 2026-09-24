@@ -85,6 +85,16 @@ def _require_executable() -> str:
     return executable
 
 
+async def _spawn_ob(executable: str, args: list[str], *, stdin: int, stderr: int) -> asyncio.subprocess.Process:
+    """Start one `ob` process with its stdout piped; a spawn failure is an `ObsidianSyncError`."""
+    try:
+        return await asyncio.create_subprocess_exec(
+            executable, *args, stdin=stdin, stdout=asyncio.subprocess.PIPE, stderr=stderr
+        )
+    except OSError as error:
+        raise ObsidianSyncError(f"Cannot run Obsidian Headless ({executable}): {error.strerror or error}") from None
+
+
 async def _run_ob(
     executable: str,
     args: list[str],
@@ -94,11 +104,10 @@ async def _run_ob(
 ) -> _ObResult:
     """Run one `ob` command to completion and return its redacted output."""
     # Without stdin text, stdin is empty so that an unexpected `ob` prompt reads EOF instead of blocking.
-    process = await asyncio.create_subprocess_exec(
+    process = await _spawn_ob(
         executable,
-        *args,
+        args,
         stdin=asyncio.subprocess.PIPE if stdin_text is not None else asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
     try:
@@ -386,14 +395,10 @@ class ObsidianSyncSupervisor:
 
     async def _run_sync(self, executable: str, path: Path, password: str | None) -> tuple[int, str, bool]:
         """Run `ob sync --continuous` until it exits; return its exit code, last line, and whether it synced."""
-        process = await asyncio.create_subprocess_exec(
+        process = await _spawn_ob(
             executable,
-            "sync",
-            "--continuous",
-            "--path",
-            str(path),
+            ["sync", "--continuous", "--path", str(path)],
             stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
         last_line = ""

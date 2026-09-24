@@ -4,6 +4,7 @@ import os
 import sys
 import json
 import time
+import asyncio
 import logging
 from typing import Any
 from pathlib import Path
@@ -412,6 +413,19 @@ def test_vault_path_defaults_to_the_instance_folder(tmp_path: Path, monkeypatch:
     assert current_vault_path() == tmp_path / "obsidian" / "Demo"
     monkeypatch.setattr(config, "OBSIDIAN_SYNC_ENABLED", False)
     assert current_vault_path() is None
+
+
+def test_ob_that_cannot_start_is_a_sync_error(fake_ob: FakeOb) -> None:
+    """An `ob` that is on PATH but cannot run is reported and retried; it does not end the supervisor thread."""
+    fake_ob.executable.write_bytes(b"not an executable format\n")
+    supervisor = ObsidianSyncSupervisor(restart_delays_seconds=(30.0,))
+
+    status = _prepare_once(supervisor)
+
+    assert status["state"] == "error"
+    assert "Cannot run Obsidian Headless" in str(status["last_error"])
+    with pytest.raises(ObsidianSyncError, match="Cannot run Obsidian Headless"):
+        asyncio.run(supervisor.list_vaults())
 
 
 @pytest.mark.parametrize("vault", ["..", "../escape", "/etc"])
