@@ -12,6 +12,7 @@ from collections.abc import Callable
 
 import pytest
 
+from reachy_mini_conversation_app import obsidian_sync
 from reachy_mini_conversation_app.config import config
 from reachy_mini_conversation_app.obsidian_sync import (
     ObsidianSyncError,
@@ -260,6 +261,24 @@ def test_restart_after_final_shutdown_starts_nothing(fake_ob: FakeOb) -> None:
     assert fake_ob.commands().count("sync") == 1
 
 
+def test_only_the_next_start_ends_an_expected_link_check(fake_ob: FakeOb) -> None:
+    """After a vault change is expected, the old sync loop's link checks do not end a session start's wait."""
+    fake_ob.set_sync_behavior("fail")
+    supervisor = ObsidianSyncSupervisor(restart_delays_seconds=(0.05,))
+    supervisor.start()
+    try:
+        _wait_until(lambda: fake_ob.commands().count("sync") >= 1)
+        supervisor.expect_link_check()
+        checks = fake_ob.commands().count("sync-status")
+        _wait_until(lambda: fake_ob.commands().count("sync-status") >= checks + 2)
+        assert supervisor.wait_for_link_check(0) is False
+
+        supervisor.restart()
+        assert supervisor.wait_for_link_check(10.0) is True
+    finally:
+        supervisor.stop()
+
+
 def test_supervisor_refuses_a_path_linked_to_another_vault(fake_ob: FakeOb, tmp_path: Path) -> None:
     """A local path already linked to another vault is reported, not set up again."""
     (tmp_path / "vault").mkdir()
@@ -406,12 +425,35 @@ def test_vault_path_defaults_to_the_instance_folder(tmp_path: Path, monkeypatch:
     monkeypatch.setattr(config, "OBSIDIAN_SYNC_PATH", None)
     monkeypatch.setattr(config, "OBSIDIAN_SYNC_VAULT", "Demo")
     monkeypatch.setattr(config, "OBSIDIAN_SYNC_ENABLED", True)
+    monkeypatch.setattr(obsidian_sync.supervisor, "linked", ("Demo", tmp_path / "obsidian" / "Demo"))
 
     assert configured_vault_path() == tmp_path / "obsidian" / "Demo"
     assert current_vault_path() is None
     (tmp_path / "obsidian" / "Demo").mkdir(parents=True)
     assert current_vault_path() == tmp_path / "obsidian" / "Demo"
     monkeypatch.setattr(config, "OBSIDIAN_SYNC_ENABLED", False)
+    assert current_vault_path() is None
+
+
+def test_vault_files_are_exposed_only_after_ob_confirms_the_link(
+    fake_ob: FakeOb, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A local folder linked to another vault is never the synced vault; a folder that `ob` linked to it is."""
+    supervisor = ObsidianSyncSupervisor(restart_delays_seconds=(30.0,))
+    monkeypatch.setattr(obsidian_sync, "supervisor", supervisor)
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / ".linked").write_text(json.dumps({"vaultId": "id-2", "vaultName": "Shared"}))
+    assert current_vault_path() is None
+
+    refused = _prepare_once(supervisor)
+    assert "linked to another vault" in str(refused["last_error"])
+    assert current_vault_path() is None
+
+    (vault / ".linked").unlink()
+    assert _prepare_once(supervisor)["state"] == "syncing"
+    assert current_vault_path() == vault
+    monkeypatch.setattr(config, "OBSIDIAN_SYNC_VAULT", "Shared")
     assert current_vault_path() is None
 
 

@@ -203,7 +203,7 @@ Passwords reach `ob` on stdin, not on the command line. The encryption password 
 
 #### Vault access for personalities
 
-The `vault_read`, `vault_query`, and `vault_write` tools use the synced vault. The vault must have a `System/Schema.md` note with one `yaml vault-schema` block (the vault contract). Enable the tools for a personality in Tools → Tool access, then set its vault access in Settings → Vault access. The app stores it in `profile_vault_access.json`, next to `profile_toolsets.json`:
+The `vault_read`, `vault_query`, and `vault_write` tools use the synced vault. The app uses the local folder only after `ob` confirms that the folder is linked to the configured remote vault; a session that starts during that check waits for it for up to 10 s. The vault must have a `System/Schema.md` note with one `yaml vault-schema` block (the vault contract). Enable the tools for a personality in Tools → Tool access, then set its vault access in Settings → Vault access. The app stores it in `profile_vault_access.json`, next to `profile_toolsets.json`:
 
 ```json
 {

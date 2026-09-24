@@ -7,6 +7,7 @@ from pathlib import Path
 from datetime import date, datetime, timedelta
 from dataclasses import field, dataclass
 
+from reachy_mini_conversation_app import obsidian_sync
 from reachy_mini_conversation_app.vault import (
     Vault,
     TypeRule,
@@ -35,6 +36,7 @@ logger = logging.getLogger(__name__)
 
 SESSION_CONTEXT_MAX_CHARS = 8000
 TRANSCRIPT_MAX_CHARS = 20000
+VAULT_LINK_WAIT_SECONDS = 10.0
 AGENTS_FILENAME = "AGENTS.md"
 # The agent section can sit anywhere in AGENTS.md, so this read cap is larger than the context cap.
 AGENTS_MAX_CHARS = 32000
@@ -80,7 +82,7 @@ def active_vault(instance_path: str | Path | None, profile: str | None = None) -
     """Return the synced vault and a profile's vault access (default: the active profile), or raise `VaultError`."""
     root = current_vault_path()
     if root is None:
-        raise VaultError("Obsidian Sync is off or the local vault folder does not exist")
+        raise VaultError("Obsidian Sync is off, or the local vault folder is missing or not linked to the vault yet")
     profile = profile or canonical_profile_name(config.REACHY_MINI_CUSTOM_PROFILE)
     try:
         access = read_profile_vault_access(instance_path).get(profile)
@@ -227,12 +229,17 @@ class VaultSession:
         """Start the session and load its vault context, unless it already runs for the active profile.
 
         A running session of the same profile keeps its transcript; it reloads its context when the profile's
-        vault tools changed, so that the context describes the tools the model has.
+        vault tools changed, so that the context describes the tools the model has, and when it has no context but
+        the vault is now available.
         """
+        # At app start and after a vault change, `ob` confirms the vault link a few seconds after the connection.
+        # A vault change also ends the running session meanwhile, so that this start begins a new one.
+        obsidian_sync.supervisor.wait_for_link_check(VAULT_LINK_WAIT_SECONDS)
         profile = canonical_profile_name(config.REACHY_MINI_CUSTOM_PROFILE)
         if self.started_at is not None:
             if self.profile == profile:
-                if _has_vault_tools(profile, instance_path) != self.vault_tools:
+                tools_changed = _has_vault_tools(profile, instance_path) != self.vault_tools
+                if tools_changed or (not self.context and current_vault_path() is not None):
                     self._load_context(instance_path)
                 return
             # A profile change ends the old profile's session, so its turns stay in its own vault notes.

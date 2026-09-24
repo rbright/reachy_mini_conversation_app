@@ -1,12 +1,15 @@
 import re
+import threading
 from pathlib import Path
 from datetime import date, datetime
 
 import pytest
 
 import reachy_mini_conversation_app.vault_session as vault_session_mod
+from reachy_mini_conversation_app import obsidian_sync
 from reachy_mini_conversation_app.vault import parse_note
 from reachy_mini_conversation_app.config import config
+from reachy_mini_conversation_app.obsidian_sync import ObsidianSyncSupervisor
 from reachy_mini_conversation_app.vault_session import TRANSCRIPT_MAX_CHARS, SESSION_CONTEXT_MAX_CHARS, VaultSession
 from reachy_mini_conversation_app.profile_toolsets import write_profile_tool_override
 from reachy_mini_conversation_app.profile_vault_access import ProfileVaultAccess, write_profile_vault_access
@@ -296,6 +299,46 @@ def test_transcript_stops_growing_at_its_cap(emma_vault: Path, fixture_vault: Pa
     session.end(emma_vault, now=datetime(2026, 9, 23, 18, 0))
     (log,) = (fixture_vault / "Emma/Sessions").iterdir()
     assert log.read_text(encoding="utf-8").rstrip().endswith("_Transcript truncated._")
+
+
+def test_session_start_waits_for_the_vault_link_check(
+    emma_vault: Path, fixture_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A session that starts while `ob` still checks the vault link gets the vault context when the check ends."""
+    supervisor = ObsidianSyncSupervisor()
+    monkeypatch.setattr(obsidian_sync, "supervisor", supervisor)
+    monkeypatch.setattr(vault_session_mod, "current_vault_path", lambda: fixture_vault if supervisor.linked else None)
+    supervisor.expect_link_check()
+
+    def confirm_link() -> None:
+        supervisor.linked = ("Fixture", fixture_vault)
+        supervisor.stop()
+
+    timer = threading.Timer(0.2, confirm_link)
+    timer.start()
+    session = VaultSession()
+    session.begin(emma_vault)
+    timer.join()
+
+    assert "Ask about the dinosaur book." in session.context
+
+
+def test_reconnect_loads_the_context_that_was_missing_at_session_start(
+    emma_vault: Path, fixture_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A session that started before the vault link was confirmed gets the vault context at its next reconnect."""
+    linked: list[Path] = []
+    monkeypatch.setattr(vault_session_mod, "current_vault_path", lambda: linked[0] if linked else None)
+    session = VaultSession()
+    session.begin(emma_vault)
+    session.record("user", "Hello")
+    assert session.context == ""
+
+    linked.append(fixture_vault)
+    session.begin(emma_vault)
+
+    assert "Ask about the dinosaur book." in session.context
+    assert session.turns == [("user", "Hello")]
 
 
 def test_profile_change_ends_the_old_profiles_session(
