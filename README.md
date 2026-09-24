@@ -114,6 +114,14 @@ Copy `.env.example` to `.env` to configure a provider outside the web UI.
 | `REACHY_MINI_WAKE_WORD_MODEL` | Optional path to a custom openWakeWord ONNX model. Defaults to the bundled `Hey Emma` model. |
 | `REACHY_MINI_WAKE_WORD_THRESHOLD` | Wake confidence threshold, greater than `0` through `1`. Defaults to `0.5`. |
 | `REACHY_MINI_SLEEP_PHRASES` | Comma-separated phrases matched against final user transcripts. Defaults include `Goodbye Emma` and `go to sleep`. |
+| `OBSIDIAN_SYNC_ENABLED` | Runs Obsidian Sync for one vault. Defaults to `false`. See [Obsidian Sync](#obsidian-sync). |
+| `OBSIDIAN_HEADLESS_BIN` | Obsidian Headless executable. Defaults to `ob` on `PATH`. |
+| `OBSIDIAN_SYNC_VAULT` | Remote vault name or ID. The Settings UI lists the vaults of the signed-in account. |
+| `OBSIDIAN_SYNC_PATH` | Local vault folder. Defaults to `<instance path>/obsidian/<vault>`. |
+| `OBSIDIAN_SYNC_DEVICE_NAME` | Device name in the vault's sync history. Defaults to `reachy-mini`. |
+| `OBSIDIAN_SYNC_MODE` | `bidirectional` (default) or `pull-only`. `mirror-remote` is refused because it reverts local writes. |
+| `OBSIDIAN_SYNC_CONFLICT_STRATEGY` | `merge` (default) or `conflict`. |
+| `OBSIDIAN_SYNC_E2EE_PASSWORD` | End-to-end encryption password of the remote vault. The Settings UI can save or replace it and never returns it to the browser. |
 
 With wake gating enabled, the microphone runs only the local wake-word model until it detects the wake phrase. Reachy wakes and starts a fresh realtime session. A configured sleep phrase closes that session, moves Reachy to its sleep pose, and leaves the local detector running for the next wake phrase. The optional openWakeWord runtime is installed on Linux ARM64 with Python 3.11 or 3.12, which covers the Reachy Mini deployment. On other platforms or when that runtime cannot load, the app logs the error and continues in always-on mode.
 
@@ -170,6 +178,50 @@ HF_REALTIME_WS_URL=ws://127.0.0.1:8765/v1/realtime
 
 In the web UI's Settings view, select Hugging Face or OpenAI Realtime. Hugging Face keeps its hosted/local controls. OpenAI exposes its API key, validated model catalog, and native voice catalog. Voice choices update for the selected provider.
 
+### Obsidian Sync
+
+The app can keep one [Obsidian Sync](https://obsidian.md/sync) vault synced on the robot with [Obsidian Headless](https://www.npmjs.com/package/obsidian-headless) (`ob`). The app does not install `ob` or Node.js: install `obsidian-headless` (Node.js 22 or later) on the device first. If `ob` is missing, the Settings UI reports it and the conversation keeps working.
+
+Configure it in the Settings view, in the Obsidian Sync card:
+
+1. Sign in with your Obsidian account email, password, and 2FA code if you use one. The app passes them to `ob login` once and does not store them. `ob` keeps its own sign-in state in the app user's home folder.
+2. Load the remote vaults, choose one, and set the other options. Leave the local path blank to use `<instance path>/obsidian/<vault>`.
+3. Enter the vault's end-to-end encryption password if it has one, turn sync on, and save.
+
+The app links the local folder with `ob sync-setup` when needed, applies the mode, conflict strategy, and device name with `ob sync-config`, and runs `ob sync --continuous`. It writes the `ob` output to the app log, with the encryption password redacted. If `ob sync` fails, the app restarts it after 5 s, 30 s, and 120 s, then every 5 minutes. On app stop, it sends `SIGINT` and waits 10 s before it sends `SIGTERM`.
+
+Passwords reach `ob` on stdin, not on the command line. The encryption password is stored in the instance `.env` (mode `0600`), like the OpenAI key; the UI reports only whether it exists.
+
+#### Vault access for personalities
+
+The `vault_read`, `vault_query`, and `vault_write` tools use the synced vault. The vault must have a `System/Schema.md` note with one `yaml vault-schema` block (the vault contract). Enable the tools for a personality in Tools → Tool access, then set its vault access in Settings → Vault access. The app stores it in `profile_vault_access.json`, next to `profile_toolsets.json`:
+
+```json
+{
+  "version": 1,
+  "profiles": {
+    "Emma": {
+      "agent": "emma",
+      "read": [".", "Emma/Conversation Playbook", "Emma/Sessions", "Emma/Weekly Memories"],
+      "write": ["Emma/Sessions", "Emma/Weekly Memories"],
+      "session_context": ["Emma/Conversation Playbook/Current.md"],
+      "session_log": {"folder": "Emma/Sessions", "type": "emma-session", "properties": {"date": "{date}"}},
+      "weekly_memory": {
+        "folder": "Emma/Weekly Memories",
+        "type": "emma-memory",
+        "date_weekday": 5,
+        "properties": {"date": "{date}", "week_of": "{week_start}"}
+      }
+    }
+  }
+}
+```
+
+- A folder must be in this list and in the `agents` section of the vault schema for the same agent. `.` is the vault root. No agent writes `System/`.
+- `vault_write` sets `created`, `author: agent/<agent>`, and `run: reachy:<agent>:<session-id>`, and checks the note type, folder, and keys against the schema. It refuses paths with `..` or symbolic links, non-Markdown files, existing logs and dated notes, `approved` or `superseded` artifacts, and text that looks like a credential. It writes a temporary file and renames it.
+- At session start, the app adds a schema summary and the agent's section of the vault `AGENTS.md` to the instructions as rules. It reads `AGENTS.md` only when the vault root (`.`) is a read folder here and in the schema. When the personality has no `vault_*` tool, the summary says only that the app saves the session notes. Then it adds the `session_context` notes as delimited, untrusted reference data, which the model must not follow as instructions. A context note with a `current_note` wikilink also brings in the note it names (one level, same read folders); that note keeps its room first when the cap binds. The total is 8000 characters at most. Reconnects in the same wake session reuse them; a personality change ends the session and starts a new one.
+- At session end (sleep phrase, app stop, shutdown, or personality change), the app writes one `session_log` note with the transcript. It writes nothing when the user did not speak. The note name comes from the type's `name` rule in the schema; `{slug}` is the start time plus a session id suffix, so each session gets its own note. The session end also writes one `weekly_memory` note for each finished week (up to 8 weeks back) that has session logs and no weekly memory yet. `{date}` in a weekly memory is the `date_weekday` day of that week.
+
 ## Running the app
 
 Activate your virtual environment, then launch:
@@ -221,6 +273,9 @@ Every bundled profile enables `head_tracking` by default; users can still disabl
 | `sweep_look` | Sweep Reachy's head left, right, and back to center. | Shared tool, enabled by default in the default profile. |
 | `remember` | Save one short, stable fact about the user for future sessions. | Core install only. Stored in the app instance data directory. |
 | `forget` | Remove a saved memory fact by matching a short query. | Core install only. |
+| `vault_read` | Read one note from the synced Obsidian vault. | Needs [Obsidian Sync](#obsidian-sync) and vault access for the personality. |
+| `vault_query` | List vault notes by folder, type, status, and created date. | Needs Obsidian Sync and vault access. |
+| `vault_write` | Create a note, or update a draft or owned record, under the vault contract. | Needs Obsidian Sync and write access. |
 | `volume_control` | Read or change Reachy's speaker or microphone volume. | Core install only. Uses the daemon REST API; setting the speaker volume plays a short confirmation sound. |
 | `robot_status` | Read one status topic: `name`, `software` (version, update available), `wifi` (IP address, network), `account` (Hugging Face sign-in), `imu` (which way the head is tilted, motion, temperature), `apps` (installed apps). | Core install only. Uses the daemon REST API. The update check and the Wi-Fi network details are wireless-version only; the IP address is reported on any robot. |
 | `pollen_robotics_reachy_mini_search_tool__search_web` | Search the web and return a short list of results. | Preinstalled MCP Space: `pollen-robotics/reachy-mini-search-tool`. |

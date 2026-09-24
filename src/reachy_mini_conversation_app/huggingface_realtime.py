@@ -238,9 +238,11 @@ class OpenAICompatibleRealtimeHandler(ConversationHandler, ABC):
     def _get_session_config(self, tool_specs: list[ToolSpec]) -> RealtimeSessionCreateRequestParam:
         """Return the OpenAI-compatible realtime session config."""
         audio_format = self._audio_format()
+        instructions = get_session_instructions(self.instance_path)
+        vault_context = self.deps.vault_session.context
         session = RealtimeSessionCreateRequestParam(
             type="realtime",
-            instructions=get_session_instructions(self.instance_path),
+            instructions=f"{instructions}\n\n{vault_context}" if vault_context else instructions,
             audio=RealtimeAudioConfigParam(
                 input=RealtimeAudioConfigInputParam(
                     format=audio_format,  # type: ignore[typeddict-item]
@@ -739,6 +741,7 @@ class OpenAICompatibleRealtimeHandler(ConversationHandler, ABC):
             connect_kwargs["extra_query"] = self._realtime_connect_query
         async with self.client.realtime.connect(**connect_kwargs) as conn:
             try:
+                await asyncio.to_thread(self.deps.vault_session.begin, self.instance_path)
                 session_config = self._get_session_config(tool_specs)
                 await conn.session.update(session=session_config)
                 logger.info(
@@ -868,6 +871,7 @@ class OpenAICompatibleRealtimeHandler(ConversationHandler, ABC):
 
                         await self.output_queue.put(AdditionalOutputs({"role": "user", "content": transcript}))
                         self._emit_transcript("user", transcript, True)
+                        self.deps.vault_session.record("user", transcript)
 
                     # Handle assistant transcription
                     if event.type == "response.output_audio_transcript.done":
@@ -877,6 +881,7 @@ class OpenAICompatibleRealtimeHandler(ConversationHandler, ABC):
                             AdditionalOutputs({"role": "assistant", "content": event.transcript})
                         )
                         self._emit_transcript("assistant", event.transcript or "", True)
+                        self.deps.vault_session.record("assistant", event.transcript or "")
 
                     # Handle audio delta
                     if event.type == "response.output_audio.delta":

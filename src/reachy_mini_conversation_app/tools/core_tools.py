@@ -10,13 +10,14 @@ import importlib.util
 from types import ModuleType
 from typing import TYPE_CHECKING, Any, Dict, List, Literal, Callable, ClassVar, Sequence, TypedDict
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import field, dataclass
 
 from reachy_mini import ReachyMini
 from reachy_mini_conversation_app.config import config, list_tool_module_names
 from reachy_mini_conversation_app.mcp_client import McpToolTimeoutError, McpToolInvocationError
 from reachy_mini_conversation_app.tool_spaces import build_remote_client, read_installed_tool_spaces
 from reachy_mini_conversation_app.profile_store import DEFAULT_PROFILE_NAME
+from reachy_mini_conversation_app.vault_session import VaultSession
 from reachy_mini_conversation_app.profile_toolsets import read_profile_tool_names
 from reachy_mini_conversation_app.tools.tool_constants import SystemTool
 
@@ -44,6 +45,8 @@ class ToolDependencies:
     camera_enabled: bool = False
     motion_duration_s: float = 1.0
     go_to_sleep: Callable[[], dict[str, Any]] | None = None
+    # One per app run: handler rebuilds and reconnects share it, so the wake session survives them.
+    vault_session: VaultSession = field(default_factory=VaultSession)
 
 
 class ToolSpec(TypedDict):

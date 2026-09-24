@@ -5,6 +5,7 @@ served via the Reachy Mini Apps settings server so users can configure it.
 """
 
 import os
+import re
 import time
 import asyncio
 import logging
@@ -21,18 +22,29 @@ from reachy_mini import ReachyMini
 from reachy_mini.io.jsonrpc import JsonRpcError
 from reachy_mini.apps.jsonrpc_server import JsonRpcServer
 from reachy_mini.media.media_manager import MediaBackend
+from reachy_mini_conversation_app import obsidian_sync
 from reachy_mini_conversation_app.config import (
     HF_BACKEND,
     LOCKED_PROFILE,
     OPENAI_BACKEND,
     OPENAI_API_KEY_ENV,
+    OBSIDIAN_SYNC_MODES,
     BACKEND_PROVIDER_ENV,
     HF_REALTIME_WS_URL_ENV,
+    OBSIDIAN_SYNC_MODE_ENV,
+    OBSIDIAN_SYNC_PATH_ENV,
     OPENAI_REALTIME_MODELS,
+    OBSIDIAN_SYNC_VAULT_ENV,
     HF_LOCAL_CONNECTION_MODE,
+    OBSIDIAN_HEADLESS_BIN_ENV,
+    OBSIDIAN_SYNC_ENABLED_ENV,
     OPENAI_REALTIME_MODEL_ENV,
     HF_DEPLOYED_CONNECTION_MODE,
+    OBSIDIAN_SYNC_DEVICE_NAME_ENV,
     HF_REALTIME_CONNECTION_MODE_ENV,
+    OBSIDIAN_SYNC_E2EE_PASSWORD_ENV,
+    OBSIDIAN_SYNC_CONFLICT_STRATEGIES,
+    OBSIDIAN_SYNC_CONFLICT_STRATEGY_ENV,
     config,
     get_default_voice,
     get_backend_choice,
@@ -56,6 +68,7 @@ from reachy_mini_conversation_app.wake_word import (
     WakeWordDetector,
     matches_sleep_phrase,
 )
+from reachy_mini_conversation_app.obsidian_sync import ObsidianSyncError
 from reachy_mini_conversation_app.startup_settings import read_startup_settings, write_startup_settings
 from reachy_mini_conversation_app.tools.core_tools import initialize_tools
 from reachy_mini_conversation_app.tool_space_routes import register_tool_space_methods
@@ -113,6 +126,8 @@ LEGACY_STARTUP_ENV_NAMES = (
     "REACHY_MINI_VOICE_OVERRIDE",
 )
 BACKEND_RETRY_DELAY_SECONDS = 5.0
+# Values outside this set are single-quoted in `.env` so that python-dotenv keeps `#`, spaces, and `$` literally.
+_PLAIN_ENV_VALUE = re.compile(r"[A-Za-z0-9_./:@+,=-]*")
 
 
 class _StreamingResampler:
@@ -328,6 +343,7 @@ class LocalStream:
         """Close the active conversation and move the robot to sleep."""
         try:
             await self._shutdown_active_handler()
+            await asyncio.to_thread(self.handler.deps.vault_session.end, self._instance_path)
             if self._on_sleep_phrase is not None:
                 try:
                     await asyncio.to_thread(self._on_sleep_phrase)
@@ -533,6 +549,8 @@ class LocalStream:
             env_path = inst / ".env"
             lines = self._read_env_lines(env_path)
             for env_name, value in normalized_updates.items():
+                if not _PLAIN_ENV_VALUE.fullmatch(value):
+                    value = "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
                 replaced = False
                 for i, ln in enumerate(lines):
                     if ln.strip().startswith(f"{env_name}="):
@@ -836,6 +854,93 @@ class LocalStream:
                 message = "Backend saved. Restart Reachy Mini Conversation from the desktop app to apply it."
             return {"ok": True, "message": message, **_status_payload()}
 
+        @rpc.method("obsidian.status")  # type: ignore[untyped-decorator]
+        def _rpc_obsidian_status(_params: dict[str, object]) -> dict[str, object]:
+            return obsidian_sync.supervisor.status()
+
+        @rpc.method("obsidian.login")  # type: ignore[untyped-decorator]
+        async def _rpc_obsidian_login(params: dict[str, object]) -> dict[str, object]:
+            email = str(params.get("email") or "").strip()
+            password = str(params.get("password") or "")
+            mfa_code = str(params.get("mfa_code") or "").strip() or None
+            if not email or not password:
+                raise JsonRpcError(
+                    "Obsidian email and password required", reason="obsidian_credentials_required", code=-32602
+                )
+            try:
+                message = await obsidian_sync.supervisor.login(email, password, mfa_code)
+            except ObsidianSyncError as e:
+                raise JsonRpcError(str(e), reason="obsidian_login_failed") from None
+            await asyncio.to_thread(obsidian_sync.supervisor.restart)
+            return {"ok": True, "message": message, **obsidian_sync.supervisor.status()}
+
+        @rpc.method("obsidian.list_vaults")  # type: ignore[untyped-decorator]
+        async def _rpc_obsidian_list_vaults(_params: dict[str, object]) -> dict[str, object]:
+            try:
+                vaults = await obsidian_sync.supervisor.list_vaults()
+            except ObsidianSyncError as e:
+                raise JsonRpcError(str(e), reason="obsidian_list_failed") from None
+            return {"vaults": vaults}
+
+        @rpc.method("obsidian.configure")  # type: ignore[untyped-decorator]
+        async def _rpc_obsidian_configure(params: dict[str, object]) -> dict[str, object]:
+            texts = {
+                name: str(params.get(name) or "").strip()
+                for name in ("vault", "headless_bin", "device_name", "mode", "conflict_strategy", "path")
+            }
+            if params.get("enabled") is True and not (texts["vault"] or config.OBSIDIAN_SYNC_VAULT):
+                raise JsonRpcError("choose a remote vault", reason="obsidian_vault_required", code=-32602)
+            if texts["mode"] == "mirror-remote":
+                raise JsonRpcError("mirror-remote reverts local writes", reason="obsidian_mode_refused", code=-32602)
+            if texts["mode"] and texts["mode"] not in OBSIDIAN_SYNC_MODES:
+                raise JsonRpcError("invalid Obsidian Sync mode", reason="invalid_obsidian_mode", code=-32602)
+            if texts["conflict_strategy"] and texts["conflict_strategy"] not in OBSIDIAN_SYNC_CONFLICT_STRATEGIES:
+                raise JsonRpcError(
+                    "invalid Obsidian conflict strategy", reason="invalid_obsidian_conflict_strategy", code=-32602
+                )
+            if texts["path"] and not Path(texts["path"]).expanduser().is_absolute():
+                raise JsonRpcError("Obsidian local path must be absolute", reason="invalid_obsidian_path", code=-32602)
+
+            # A blank vault or E2EE password keeps the stored value (like the OpenAI key); a blank defaulted
+            # setting that the request names goes back to its default.
+            updates = {
+                OBSIDIAN_SYNC_VAULT_ENV: texts["vault"],
+                OBSIDIAN_SYNC_E2EE_PASSWORD_ENV: str(params.get("e2ee_password") or "").strip(),
+            }
+            if "enabled" in params:
+                updates[OBSIDIAN_SYNC_ENABLED_ENV] = "true" if params["enabled"] is True else "false"
+            cleared: list[str] = []
+            for name, env_name in (
+                ("headless_bin", OBSIDIAN_HEADLESS_BIN_ENV),
+                ("device_name", OBSIDIAN_SYNC_DEVICE_NAME_ENV),
+                ("mode", OBSIDIAN_SYNC_MODE_ENV),
+                ("conflict_strategy", OBSIDIAN_SYNC_CONFLICT_STRATEGY_ENV),
+                ("path", OBSIDIAN_SYNC_PATH_ENV),
+            ):
+                if texts[name]:
+                    updates[env_name] = texts[name]
+                elif name in params:
+                    cleared.append(env_name)
+
+            if cleared:
+                # Removed from the instance `.env` first, so that the reload in `_persist_env_values` cannot restore them.
+                self._remove_persisted_env_values(tuple(cleared))
+                for env_name in cleared:
+                    os.environ.pop(env_name, None)
+                refresh_runtime_config_from_env()
+            self._persist_env_values(updates)
+            await asyncio.to_thread(obsidian_sync.supervisor.restart)
+            return {"ok": True, "message": "Obsidian Sync settings saved.", **obsidian_sync.supervisor.status()}
+
+        @rpc.method("obsidian.logout")  # type: ignore[untyped-decorator]
+        async def _rpc_obsidian_logout(_params: dict[str, object]) -> dict[str, object]:
+            try:
+                await obsidian_sync.supervisor.logout()
+            except ObsidianSyncError as e:
+                raise JsonRpcError(str(e), reason="obsidian_logout_failed") from None
+            await asyncio.to_thread(obsidian_sync.supervisor.stop)
+            return {"ok": True, "message": "Signed out of Obsidian.", **obsidian_sync.supervisor.status()}
+
         rpc.mount(settings_app)
         self._rpc = rpc
 
@@ -1023,6 +1128,8 @@ class LocalStream:
             finally:
                 # Ensure handler connection is closed
                 await self.handler.shutdown()
+                # App stop and shutdown end the wake session; write its note before Obsidian Sync stops.
+                await asyncio.to_thread(self.handler.deps.vault_session.end, self._instance_path)
 
         asyncio.run(runner())
 

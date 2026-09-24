@@ -17,6 +17,11 @@ from reachy_mini_conversation_app.personality_routes import (
     PersonalityOps,
     build_personality_ops,
 )
+from reachy_mini_conversation_app.profile_vault_access import (
+    ProfileVaultAccess,
+    read_profile_vault_access,
+    write_profile_vault_access,
+)
 
 
 def _make_user_profile(name: str) -> None:
@@ -32,16 +37,20 @@ def _ops(persisted: str | None = None) -> PersonalityOps:
 
 
 def test_delete_removes_user_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Deleting a user profile also removes its tool override."""
+    """Deleting a user profile also removes its tool override and its vault access."""
     monkeypatch.setattr(config, "INSTANCE_PATH", tmp_path)
     _make_user_profile("doomed")
     profile_dir = tmp_path / "user_personalities" / "doomed"
     write_profile_tool_override("user_personalities/doomed", ["dance"], tmp_path)
+    access = ProfileVaultAccess.model_validate({"agent": "emma", "read": ["Emma"]})
+    write_profile_vault_access("user_personalities/doomed", access, tmp_path)
+    write_profile_vault_access("user_personalities/kept", access, tmp_path)
     assert profile_dir.is_dir()
 
     assert delete_personality("user_personalities/doomed") is True
     assert not profile_dir.exists()
     assert read_profile_tool_override("user_personalities/doomed", tmp_path) is None
+    assert list(read_profile_vault_access(tmp_path)) == ["user_personalities/kept"]
 
 
 def test_delete_refuses_builtin_profile(monkeypatch: pytest.MonkeyPatch) -> None:
