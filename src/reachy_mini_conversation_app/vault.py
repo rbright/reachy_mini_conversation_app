@@ -238,7 +238,11 @@ def open_vault(root: Path) -> Vault:
     path = root / SCHEMA_PATH
     if not path.is_file():
         raise SchemaError(f"{SCHEMA_PATH} not found; this vault has no contract schema yet")
-    return Vault(root=root, schema=parse_schema(path.read_text(encoding="utf-8")))
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        raise SchemaError(f"{SCHEMA_PATH} is not valid UTF-8") from None
+    return Vault(root=root, schema=parse_schema(text))
 
 
 def parse_note(text: str) -> tuple[dict[str, object] | None, str]:

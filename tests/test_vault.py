@@ -291,6 +291,14 @@ def test_schema_needs_exactly_one_valid_block() -> None:
         )
 
 
+def test_schema_that_is_not_utf8_is_a_schema_error(fixture_vault: Path) -> None:
+    """Invalid UTF-8 in the schema note is a vault error, so session start can continue without vault context."""
+    (fixture_vault / "System/Schema.md").write_bytes(b"# Schema\n\xff\xfe\n")
+
+    with pytest.raises(SchemaError, match="UTF-8"):
+        open_vault(fixture_vault)
+
+
 def test_read_missing_note_is_an_error(fixture_vault: Path) -> None:
     """A missing note is a VaultError, not a crash."""
     with pytest.raises(VaultError, match="not found"):
