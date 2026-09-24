@@ -233,7 +233,10 @@ class ObsidianSyncSupervisor:
 
     async def list_vaults(self) -> list[dict[str, str]]:
         """Return the remote vaults (`id`, `name`, `region`) of the signed-in account."""
-        result = await _run_ob(_require_executable(), ["sync-list-remote", "--json"])
+        return await self._remote_vaults(_require_executable())
+
+    async def _remote_vaults(self, executable: str) -> list[dict[str, str]]:
+        result = await _run_ob(executable, ["sync-list-remote", "--json"])
         if result.returncode != 0:
             if result.not_signed_in:
                 self._signed_in = False
@@ -250,6 +253,37 @@ class ObsidianSyncSupervisor:
             for entry in entries
             if isinstance(entry, dict) and "id" in entry and "name" in entry
         ]
+
+    async def _unlink_other_paths(self, executable: str, vault: str, path: Path) -> str:
+        """Resolve `vault` to its remote id and unlink every other local path of that id; return the id."""
+        # `ob` keeps one sync state per vault id. A setup on a new path reuses the old path's file index, and the
+        # next sync then deletes on the server every file that the new, empty folder lacks.
+        ids = {entry["id"] for entry in await self._remote_vaults(executable) if vault in (entry["id"], entry["name"])}
+        if len(ids) != 1:
+            found = "is not" if not ids else "names more than one vault"
+            raise ObsidianSyncError(f"Remote vault {vault} {found} in this account; choose the vault again.")
+        vault_id = ids.pop()
+        local = await _run_ob(executable, ["sync-list-local", "--json"])
+        if local.returncode != 0:
+            raise ObsidianSyncError(f"ob sync-list-local failed: {local.message}")
+        try:
+            payload = json.loads(local.stdout)
+        except json.JSONDecodeError as error:
+            raise ObsidianSyncError(f"Unexpected ob sync-list-local output: {error}") from None
+        entries = payload.get("vaults", []) if isinstance(payload, dict) else []
+        if not isinstance(entries, list):
+            raise ObsidianSyncError("Unexpected ob sync-list-local output: `vaults` is not a list")
+        for entry in entries:
+            if not (isinstance(entry, dict) and str(entry.get("id")) == vault_id and entry.get("path")):
+                continue
+            old_path = Path(str(entry["path"])).expanduser()
+            if old_path.resolve() == path.resolve():
+                continue
+            logger.info("Unlinking %s from Obsidian vault %s before linking %s", old_path, vault, path)
+            unlink = await _run_ob(executable, ["sync-unlink", "--path", str(old_path)])
+            if unlink.returncode != 0:
+                raise ObsidianSyncError(f"ob sync-unlink failed for {old_path}: {unlink.message}")
+        return vault_id
 
     def _run_loop(self, loop: asyncio.AbstractEventLoop, task: asyncio.Task[None]) -> None:
         asyncio.set_event_loop(loop)
@@ -310,13 +344,14 @@ class ObsidianSyncSupervisor:
                 raise ObsidianSyncError(f"{path} is linked to another vault. Choose another local path.")
         else:
             logger.info("Linking %s to Obsidian vault %s", path, vault)
+            vault_id = await self._unlink_other_paths(executable, vault, path)
             # `ob sync-setup` prompts for the E2EE password on stdin (see login); it asks only for E2EE vaults.
             setup = await _run_ob(
                 executable,
                 [
                     "sync-setup",
                     "--vault",
-                    vault,
+                    vault_id,
                     "--path",
                     str(path),
                     "--device-name",

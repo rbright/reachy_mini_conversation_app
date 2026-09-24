@@ -41,20 +41,34 @@ def record(event, **extra):
     with open(home / "calls.jsonl", "a") as log:
         log.write(json.dumps({"event": event, "args": args, "stdin": stdin_text, "time": time.monotonic(), **extra}) + "\n")
 
+REMOTE = {"id-1": "Luna", "id-2": "Shared"}
+
+def local_entries():
+    registry = home / "local.json"
+    return json.loads(registry.read_text()) if registry.exists() else []
+
 record("call")
 if command == "sync-status":
     linked = Path(options["--path"]) / ".linked"
     if not linked.exists():
         print("No sync configuration found", file=sys.stderr)
         sys.exit(3)
-    print(json.dumps({"vaultId": "id-1", "vaultName": linked.read_text()}))
+    print(linked.read_text())
 elif command == "sync-setup":
     if stdin_text != (home / "e2ee").read_text():
         print("Failed to validate password.", file=sys.stderr)
         sys.exit(2)
+    vault_id = next(key for key, name in REMOTE.items() if options["--vault"] in (key, name))
     Path(options["--path"]).mkdir(parents=True, exist_ok=True)
-    (Path(options["--path"]) / ".linked").write_text(options["--vault"])
+    (Path(options["--path"]) / ".linked").write_text(json.dumps({"vaultId": vault_id, "vaultName": REMOTE[vault_id]}))
+    entries = [entry for entry in local_entries() if entry["id"] != vault_id]
+    (home / "local.json").write_text(json.dumps([*entries, {"id": vault_id, "path": options["--path"], "host": "robot"}]))
     print("Vault configured successfully!")
+elif command == "sync-list-local":
+    print(json.dumps({"vaults": local_entries()}))
+elif command == "sync-unlink":
+    (home / "local.json").write_text(json.dumps([e for e in local_entries() if e["path"] != options["--path"]]))
+    print("Vault unlinked.")
 elif command == "sync-config":
     print("Configuration updated:")
 elif command == "sync":
@@ -159,13 +173,20 @@ def test_supervisor_links_vault_syncs_and_stops_with_sigint(
     finally:
         supervisor.stop()
 
-    assert fake_ob.commands() == ["sync-status", "sync-setup", "sync-config", "sync"]
+    assert fake_ob.commands() == [
+        "sync-status",
+        "sync-list-remote",
+        "sync-list-local",
+        "sync-setup",
+        "sync-config",
+        "sync",
+    ]
     setup, sync_config = (call for call in fake_ob.calls() if call["args"][0] in ("sync-setup", "sync-config"))
     assert setup["stdin"] == E2EE_PASSWORD
     assert setup["args"] == [
         "sync-setup",
         "--vault",
-        "Luna",
+        "id-1",
         "--path",
         str(tmp_path / "vault"),
         "--device-name",
@@ -241,7 +262,7 @@ def test_restart_after_final_shutdown_starts_nothing(fake_ob: FakeOb) -> None:
 def test_supervisor_refuses_a_path_linked_to_another_vault(fake_ob: FakeOb, tmp_path: Path) -> None:
     """A local path already linked to another vault is reported, not set up again."""
     (tmp_path / "vault").mkdir()
-    (tmp_path / "vault" / ".linked").write_text("Other")
+    (tmp_path / "vault" / ".linked").write_text(json.dumps({"vaultId": "id-9", "vaultName": "Other"}))
     supervisor = ObsidianSyncSupervisor(restart_delays_seconds=(30.0,))
     supervisor.start()
     try:
@@ -252,6 +273,62 @@ def test_supervisor_refuses_a_path_linked_to_another_vault(fake_ob: FakeOb, tmp_
 
     assert "linked to another vault" in str(status["last_error"])
     assert fake_ob.commands() == ["sync-status"]
+
+
+def _prepare_once(supervisor: ObsidianSyncSupervisor) -> dict[str, object]:
+    """Run until the first sync or error and return the status."""
+    supervisor.start()
+    try:
+        _wait_until(lambda: supervisor.status()["state"] in ("syncing", "error"))
+        return supervisor.status()
+    finally:
+        supervisor.stop()
+
+
+def test_new_path_unlinks_the_old_path_of_the_same_vault_first(fake_ob: FakeOb, tmp_path: Path) -> None:
+    """A changed local path must not reuse the old path's file index, which deletes the remote vault."""
+    old, other = str(tmp_path / "old-vault"), str(tmp_path / "shared-vault")
+    (fake_ob.home / "local.json").write_text(
+        json.dumps([{"id": "id-1", "path": old, "host": "robot"}, {"id": "id-2", "path": other, "host": "robot"}])
+    )
+
+    status = _prepare_once(ObsidianSyncSupervisor(restart_delays_seconds=(30.0,)))
+
+    assert status["state"] == "syncing"
+    assert fake_ob.commands()[:5] == [
+        "sync-status",
+        "sync-list-remote",
+        "sync-list-local",
+        "sync-unlink",
+        "sync-setup",
+    ]
+    unlinks = [call["args"] for call in fake_ob.calls() if call["args"][0] == "sync-unlink"]
+    assert unlinks == [["sync-unlink", "--path", old]]
+    local = json.loads((fake_ob.home / "local.json").read_text())
+    assert sorted((entry["id"], entry["path"]) for entry in local) == [
+        ("id-1", str(tmp_path / "vault")),
+        ("id-2", other),
+    ]
+
+
+def test_unresolvable_vault_is_not_set_up(fake_ob: FakeOb, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without a remote id for the configured vault, the supervisor reports an error and runs no setup."""
+    monkeypatch.setattr(config, "OBSIDIAN_SYNC_VAULT", "Missing")
+
+    status = _prepare_once(ObsidianSyncSupervisor(restart_delays_seconds=(30.0,)))
+
+    assert status["state"] == "error"
+    assert "Missing is not in this account" in str(status["last_error"])
+    assert fake_ob.commands() == ["sync-status", "sync-list-remote"]
+
+
+def test_first_link_without_an_old_path_only_sets_up(fake_ob: FakeOb) -> None:
+    """With no other local path for the vault, nothing is unlinked."""
+    status = _prepare_once(ObsidianSyncSupervisor(restart_delays_seconds=(30.0,)))
+
+    assert status["state"] == "syncing"
+    assert "sync-unlink" not in fake_ob.commands()
+    assert fake_ob.commands().count("sync-setup") == 1
 
 
 def test_supervisor_without_ob_reports_unavailable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
