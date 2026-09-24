@@ -475,19 +475,20 @@ class LocalStream:
         except Exception as e:
             logger.debug("Active handler shutdown ignored during restart: %s", e)
 
-    async def request_backend_restart(self, reason: str) -> None:
-        """Ask the stream loop to rebuild the backend and stop the current handler."""
+    async def request_backend_restart(self, reason: str, *, rebuild: bool = True) -> None:
+        """Stop the current handler and ask the stream loop to rebuild the backend, unless `rebuild` is false."""
         loop = self._asyncio_loop
         if loop is not None and loop.is_running() and asyncio.get_running_loop() is not loop:
-            future = asyncio.run_coroutine_threadsafe(self.request_backend_restart(reason), loop)
+            future = asyncio.run_coroutine_threadsafe(self.request_backend_restart(reason, rebuild=rebuild), loop)
             await asyncio.wrap_future(future)
             return
 
         logger.info("Backend restart requested: %s", reason)
         self._set_backend_connection_state("connecting")
-        if self._wake_word_detector is not None and not self._wake_gate_open:
-            self._wake_handler_ready.clear()
-        self._restart_requested.set()
+        if rebuild:
+            if self._wake_word_detector is not None and not self._wake_gate_open:
+                self._wake_handler_ready.clear()
+            self._restart_requested.set()
         await self._shutdown_active_handler()
 
     async def _sleep_or_restart_requested(self, delay: float) -> None:
@@ -934,7 +935,7 @@ class LocalStream:
 
             # A running session holds the context of the vault that it started with. The backend stops first, so
             # that no turn is lost; the session ends while the old vault still syncs, so that its log reaches that
-            # vault; the reconnect waits for the new vault link, so that the next session loads the new vault.
+            # vault; the rebuild comes last, so that the next session begins after the change and loads the new vault.
             vault_changed = (
                 ("enabled" in params and (params["enabled"] is True) != config.OBSIDIAN_SYNC_ENABLED)
                 or (bool(texts["vault"]) and texts["vault"] != config.OBSIDIAN_SYNC_VAULT)
@@ -944,9 +945,10 @@ class LocalStream:
                 )
             )
             vault_session = self.handler.deps.vault_session
-            if vault_changed and vault_session.started_at is not None and self._can_rebuild_handler():
+            reconnect = vault_changed and vault_session.started_at is not None and self._can_rebuild_handler()
+            if reconnect:
                 obsidian_sync.supervisor.expect_link_check()
-                await self.request_backend_restart("obsidian_vault_changed")
+                await self.request_backend_restart("obsidian_vault_changed", rebuild=False)
             if vault_changed:
                 await asyncio.to_thread(vault_session.end, self._instance_path)
 
@@ -958,6 +960,8 @@ class LocalStream:
                 refresh_runtime_config_from_env()
             self._persist_env_values(updates)
             await asyncio.to_thread(obsidian_sync.supervisor.restart)
+            if reconnect:
+                await self.request_backend_restart("obsidian_vault_changed")
             return {"ok": True, "message": "Obsidian Sync settings saved.", **obsidian_sync.supervisor.status()}
 
         @rpc.method("obsidian.logout")

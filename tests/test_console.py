@@ -1806,7 +1806,7 @@ def test_obsidian_configure_blank_settings_restore_their_defaults(
 def test_obsidian_vault_change_stops_the_backend_then_ends_the_session_in_the_old_vault(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A vault change stops the backend, then ends the session under the old settings, so no turn is lost."""
+    """A vault change stops the backend, ends the session under the old settings, and only then rebuilds the backend."""
     for name in _OBSIDIAN_CONFIG_NAMES:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(config, "OBSIDIAN_HEADLESS_BIN", str(tmp_path / "missing-ob"))
@@ -1820,7 +1820,11 @@ def test_obsidian_vault_change_stops_the_backend_then_ends_the_session_in_the_ol
     stream = LocalStream(
         handler, _rpc_robot(), settings_app=app, instance_path=str(tmp_path), handler_factory=MagicMock()
     )
-    monkeypatch.setattr(stream, "request_backend_restart", AsyncMock(side_effect=lambda reason: events.append(reason)))
+    monkeypatch.setattr(
+        stream,
+        "request_backend_restart",
+        AsyncMock(side_effect=lambda reason, rebuild=True: events.append("rebuild" if rebuild else "stop")),
+    )
     stream._init_settings_ui_if_needed()
 
     _rpc_call(app, "obsidian.configure", {"vault": "Demo", "mode": "pull-only", "path": ""})
@@ -1828,5 +1832,5 @@ def test_obsidian_vault_change_stops_the_backend_then_ends_the_session_in_the_ol
     _rpc_call(app, "obsidian.configure", {"path": "~"})
     _rpc_call(app, "obsidian.configure", {"vault": "Shared"})
 
-    assert events == ["obsidian_vault_changed", "end in Demo", "obsidian_vault_changed", "end in Demo"]
+    assert events == ["stop", "end in Demo", "rebuild", "stop", "end in Demo", "rebuild"]
     assert config.OBSIDIAN_SYNC_VAULT == "Shared"
