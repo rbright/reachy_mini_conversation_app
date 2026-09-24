@@ -82,6 +82,21 @@ def test_write_refuses_system_folder_even_when_allowed(fixture_vault: Path) -> N
         _write(fixture_vault, "System/Notes.md", {"type": "emma-session"}, folders=("*",))
 
 
+def test_write_refuses_system_folder_in_any_letter_case(fixture_vault: Path) -> None:
+    """On a case-insensitive file system `system/` is the `System/` folder, so no letter case gets through."""
+    schema = fixture_vault / "System/Schema.md"
+    text = schema.read_text(encoding="utf-8").replace(
+        "types:\n", "types:\n  anywhere: {class: artifact, folders: ['*']}\n"
+    )
+    schema.write_text(text.replace("write: [Emma/Sessions,", "write: ['*', Emma/Sessions,"), encoding="utf-8")
+
+    for path in ("system/New.md", "SYSTEM/Notes/New.md"):
+        with pytest.raises(RefusedError, match="System"):
+            _write(fixture_vault, path, {"type": "anywhere"}, folders=("*",))
+    assert not (fixture_vault / "system").exists()
+    assert not (fixture_vault / "SYSTEM").exists()
+
+
 @pytest.mark.parametrize(
     "path",
     [
@@ -284,11 +299,12 @@ def test_schema_needs_exactly_one_valid_block() -> None:
     """A schema note without one valid block is a clear error."""
     with pytest.raises(SchemaError, match="exactly one"):
         parse_schema("# Schema\n")
-    with pytest.raises(SchemaError, match="System/"):
-        parse_schema(
-            "```yaml vault-schema\nversion: 1\nvault: V\nkeys: {}\ntypes: {}\n"
-            "agents: {emma: {write: [System/Reports]}}\n```\n"
-        )
+    for folder in ("System/Reports", "system/Reports", "SYSTEM"):
+        with pytest.raises(SchemaError, match="System/"):
+            parse_schema(
+                "```yaml vault-schema\nversion: 1\nvault: V\nkeys: {}\ntypes: {}\n"
+                f"agents: {{emma: {{write: [{folder}]}}}}\n```\n"
+            )
 
 
 def test_schema_that_is_not_utf8_is_a_schema_error(fixture_vault: Path) -> None:

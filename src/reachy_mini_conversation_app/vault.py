@@ -123,6 +123,12 @@ def covers_folder(folders: Sequence[str], folder: str) -> bool:
     )
 
 
+def _in_system_folder(path: str) -> bool:
+    """Return whether a vault-relative path is in `System/`, in any letter case."""
+    # Case-insensitive file systems (macOS, Windows) resolve `system/` to the `System/` folder.
+    return path.split("/", 1)[0].casefold() == SYSTEM_FOLDER.casefold()
+
+
 class _SchemaModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
 
@@ -178,7 +184,7 @@ class Schema(_SchemaModel):
     @classmethod
     def _no_system_writes(cls, agents: dict[str, AgentAccess]) -> dict[str, AgentAccess]:
         for agent, access in agents.items():
-            if any(folder == SYSTEM_FOLDER or folder.startswith(f"{SYSTEM_FOLDER}/") for folder in access.write):
+            if any(_in_system_folder(folder) for folder in access.write):
                 raise ValueError(f"agent {agent!r} cannot have write access to {SYSTEM_FOLDER}/")
         return agents
 
@@ -535,7 +541,7 @@ def write_note(
     schema = vault.schema
     access = _schema_agent(schema, agent)
     target = note_path(vault.root, path)
-    if covers((SYSTEM_FOLDER,), path):
+    if _in_system_folder(path):
         raise RefusedError(f"agents never write `{SYSTEM_FOLDER}/`")
     if not (covers(folders, path) and covers(access.write, path)):
         raise RefusedError(f"agent `{agent}` cannot write `{path}`")
