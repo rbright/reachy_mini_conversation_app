@@ -219,6 +219,9 @@ class VaultSession:
     context: str = ""
     vault_tools: bool = False
     turns: list[tuple[str, str]] = field(default_factory=list)
+    transcript_chars: int = 0
+    transcript_truncated: bool = False
+    user_spoke: bool = False
 
     def begin(self, instance_path: str | Path | None, now: datetime | None = None) -> None:
         """Start the session and load its vault context, unless it already runs for the active profile.
@@ -237,8 +240,14 @@ class VaultSession:
         self.started_at = now or datetime.now().astimezone()
         self.session_id = f"{self.started_at:%Y%m%dT%H%M%S}-{uuid.uuid4().hex[:6]}"
         self.profile = profile
-        self.turns = []
+        self._clear_transcript()
         self._load_context(instance_path)
+
+    def _clear_transcript(self) -> None:
+        self.turns = []
+        self.transcript_chars = 0
+        self.transcript_truncated = False
+        self.user_spoke = False
 
     def _load_context(self, instance_path: str | Path | None) -> None:
         self.context = ""
@@ -256,17 +265,26 @@ class VaultSession:
         return f"reachy:{agent}:{self.session_id}"
 
     def record(self, role: str, text: str) -> None:
-        """Add one final transcript turn on one line."""
+        """Add one final transcript turn on one line, until the transcript reaches its cap."""
         text = " ".join(text.split())
-        if self.started_at is not None and text:
-            self.turns.append((role, text))
+        if self.started_at is None or not text:
+            return
+        self.user_spoke = self.user_spoke or role == "user"
+        if self.transcript_truncated:
+            return
+        # A session can run for days, so turns past the cap are dropped here rather than kept until the log.
+        if self.transcript_chars + len(text) > TRANSCRIPT_MAX_CHARS:
+            self.transcript_truncated = True
+            return
+        self.transcript_chars += len(text)
+        self.turns.append((role, text))
 
     def end(self, instance_path: str | Path | None, now: datetime | None = None) -> None:
         """Write the session log and the weekly memory of each finished week that has none; then close the session."""
         if self.started_at is None:
             return
         try:
-            if any(role == "user" for role, _text in self.turns):
+            if self.user_spoke:
                 active = active_vault(instance_path, self.profile)
                 ended_at = now or datetime.now().astimezone()
                 self._write_session_log(active)
@@ -279,7 +297,7 @@ class VaultSession:
             self.profile = ""
             self.context = ""
             self.vault_tools = False
-            self.turns = []
+            self._clear_transcript()
 
     def _target_path(self, active: ActiveVault, target: SessionNoteTarget, values: dict[str, str], name: str) -> str:
         rule = active.vault.schema.types.get(target.type)
@@ -328,14 +346,17 @@ class VaultSession:
         }
         path = self._target_path(active, target, values, "{date}-{slug}")
         lines = [f"# {active.profile} session {started:%Y-%m-%d %H:%M}", ""]
+        truncated = self.transcript_truncated
         size = 0
         for role, text in self.turns:
             line = f"**{_USER_LABEL if role == 'user' else active.profile}:** {text}"
             size += len(line)
             if size > TRANSCRIPT_MAX_CHARS:
-                lines.append("_Transcript truncated._")
+                truncated = True
                 break
             lines.append(line)
+        if truncated:
+            lines.append("_Transcript truncated._")
         self._write_target(active, target, path, values, lines, started.date())
 
     def _write_weekly_memories(self, active: ActiveVault, ended_at: datetime) -> None:

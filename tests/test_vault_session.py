@@ -7,7 +7,7 @@ import pytest
 import reachy_mini_conversation_app.vault_session as vault_session_mod
 from reachy_mini_conversation_app.vault import parse_note
 from reachy_mini_conversation_app.config import config
-from reachy_mini_conversation_app.vault_session import SESSION_CONTEXT_MAX_CHARS, VaultSession
+from reachy_mini_conversation_app.vault_session import TRANSCRIPT_MAX_CHARS, SESSION_CONTEXT_MAX_CHARS, VaultSession
 from reachy_mini_conversation_app.profile_toolsets import write_profile_tool_override
 from reachy_mini_conversation_app.profile_vault_access import ProfileVaultAccess, write_profile_vault_access
 
@@ -280,6 +280,22 @@ def test_two_sessions_in_one_minute_write_two_logs(emma_vault: Path, fixture_vau
     assert len(bodies) == 2
     assert "**User:** First chat" in "".join(bodies)
     assert "**User:** Second chat" in "".join(bodies)
+
+
+def test_transcript_stops_growing_at_its_cap(emma_vault: Path, fixture_vault: Path) -> None:
+    """The transcript in memory stays within its cap; a user who speaks only past the cap still gets a log."""
+    session = VaultSession()
+    session.begin(emma_vault, now=datetime(2026, 9, 23, 14, 5))
+    session.record("assistant", "Hello! " + "x" * (TRANSCRIPT_MAX_CHARS - 10))
+    for index in range(TRANSCRIPT_MAX_CHARS // 100):
+        session.record("user", f"turn {index} " + "x" * 90)
+
+    assert sum(len(text) for _role, text in session.turns) <= TRANSCRIPT_MAX_CHARS
+    assert [role for role, _text in session.turns] == ["assistant"]
+
+    session.end(emma_vault, now=datetime(2026, 9, 23, 18, 0))
+    (log,) = (fixture_vault / "Emma/Sessions").iterdir()
+    assert log.read_text(encoding="utf-8").rstrip().endswith("_Transcript truncated._")
 
 
 def test_profile_change_ends_the_old_profiles_session(
