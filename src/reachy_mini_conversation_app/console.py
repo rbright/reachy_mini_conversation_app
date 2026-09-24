@@ -932,6 +932,24 @@ class LocalStream:
                 elif name in params:
                     cleared.append(env_name)
 
+            # A running session holds the context of the vault that it started with. The backend stops first, so
+            # that no turn is lost; the session ends while the old vault still syncs, so that its log reaches that
+            # vault; the reconnect waits for the new vault link, so that the next session loads the new vault.
+            vault_changed = (
+                ("enabled" in params and (params["enabled"] is True) != config.OBSIDIAN_SYNC_ENABLED)
+                or (bool(texts["vault"]) and texts["vault"] != config.OBSIDIAN_SYNC_VAULT)
+                or (
+                    "path" in params
+                    and Path(texts["path"]).expanduser() != Path(config.OBSIDIAN_SYNC_PATH or "").expanduser()
+                )
+            )
+            vault_session = self.handler.deps.vault_session
+            if vault_changed and vault_session.started_at is not None and self._can_rebuild_handler():
+                obsidian_sync.supervisor.expect_link_check()
+                await self.request_backend_restart("obsidian_vault_changed")
+            if vault_changed:
+                await asyncio.to_thread(vault_session.end, self._instance_path)
+
             if cleared:
                 # Removed from the instance `.env` first, so that the reload in `_persist_env_values` cannot restore them.
                 self._remove_persisted_env_values(tuple(cleared))

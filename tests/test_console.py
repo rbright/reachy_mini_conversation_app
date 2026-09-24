@@ -1801,3 +1801,32 @@ def test_obsidian_configure_blank_settings_restore_their_defaults(
     persisted = dotenv_values(tmp_path / ".env")
     for name in ("OBSIDIAN_SYNC_PATH", "OBSIDIAN_HEADLESS_BIN", "OBSIDIAN_SYNC_DEVICE_NAME", "OBSIDIAN_SYNC_MODE"):
         assert name not in persisted
+
+
+def test_obsidian_vault_change_stops_the_backend_then_ends_the_session_in_the_old_vault(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A vault change stops the backend, then ends the session under the old settings, so no turn is lost."""
+    for name in _OBSIDIAN_CONFIG_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(config, "OBSIDIAN_HEADLESS_BIN", str(tmp_path / "missing-ob"))
+    monkeypatch.setattr(config, "OBSIDIAN_SYNC_VAULT", "Demo")
+    monkeypatch.setattr(config, "INSTANCE_PATH", tmp_path)
+    monkeypatch.setattr(obsidian_sync, "supervisor", ObsidianSyncSupervisor())
+    events: list[str] = []
+    handler = MagicMock()
+    handler.deps.vault_session.end.side_effect = lambda _path: events.append(f"end in {config.OBSIDIAN_SYNC_VAULT}")
+    app = FastAPI()
+    stream = LocalStream(
+        handler, _rpc_robot(), settings_app=app, instance_path=str(tmp_path), handler_factory=MagicMock()
+    )
+    monkeypatch.setattr(stream, "request_backend_restart", AsyncMock(side_effect=lambda reason: events.append(reason)))
+    stream._init_settings_ui_if_needed()
+
+    _rpc_call(app, "obsidian.configure", {"vault": "Demo", "mode": "pull-only", "path": ""})
+    _rpc_call(app, "obsidian.configure", {"path": str(Path.home())})
+    _rpc_call(app, "obsidian.configure", {"path": "~"})
+    _rpc_call(app, "obsidian.configure", {"vault": "Shared"})
+
+    assert events == ["obsidian_vault_changed", "end in Demo", "obsidian_vault_changed", "end in Demo"]
+    assert config.OBSIDIAN_SYNC_VAULT == "Shared"
