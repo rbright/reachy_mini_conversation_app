@@ -8,6 +8,7 @@ import reachy_mini_conversation_app.vault_session as vault_session_mod
 from reachy_mini_conversation_app.vault import parse_note
 from reachy_mini_conversation_app.config import config
 from reachy_mini_conversation_app.vault_session import SESSION_CONTEXT_MAX_CHARS, VaultSession
+from reachy_mini_conversation_app.profile_toolsets import write_profile_tool_override
 from reachy_mini_conversation_app.profile_vault_access import ProfileVaultAccess, write_profile_vault_access
 
 
@@ -32,7 +33,96 @@ def emma_vault(fixture_vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(vault_session_mod, "current_vault_path", lambda: fixture_vault)
     monkeypatch.setattr(config, "REACHY_MINI_CUSTOM_PROFILE", "Emma")
     write_profile_vault_access("Emma", ProfileVaultAccess.model_validate(ACCESS), tmp_path)
+    write_profile_tool_override("Emma", ["vault_read", "vault_write"], tmp_path)
     return tmp_path
+
+
+PLAYBOOK = "Emma/Conversation Playbook"
+
+
+def _note(vault: Path, path: str, body: str, *, current: str | None = None) -> None:
+    pointer = f'current_note: "{current}"\n' if current else ""
+    target = vault / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(f"---\ntype: emma-playbook\ncreated: 2026-09-21\n{pointer}---\n{body}\n", encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "link",
+    [
+        "[[Emma/Conversation Playbook/Conversation Playbook - 2026-09-21]]",
+        "[[Conversation Playbook - 2026-09-21|today]]",
+    ],
+)
+def test_session_context_follows_the_current_note_pointer(emma_vault: Path, fixture_vault: Path, link: str) -> None:
+    """A context note whose `current_note` names another note brings that note in as its own data block."""
+    _note(fixture_vault, f"{PLAYBOOK}/Current.md", "Pointer only.", current=link)
+    _note(fixture_vault, f"{PLAYBOOK}/Conversation Playbook - 2026-09-21.md", "Talk about owls.")
+    session = VaultSession()
+
+    session.begin(emma_vault)
+
+    assert (
+        f'<vault-note path="{PLAYBOOK}/Conversation Playbook - 2026-09-21.md">\nTalk about owls.\n' in session.context
+    )
+    assert f'<vault-note path="{PLAYBOOK}/Current.md">\nPointer only.\n' in session.context
+
+
+def test_current_note_pointer_is_followed_one_level_only(emma_vault: Path, fixture_vault: Path) -> None:
+    """The current note's own `current_note` is not followed."""
+    _note(fixture_vault, f"{PLAYBOOK}/Current.md", "Pointer only.", current=f"[[{PLAYBOOK}/Middle]]")
+    _note(fixture_vault, f"{PLAYBOOK}/Middle.md", "Middle plan.", current=f"[[{PLAYBOOK}/Oldest]]")
+    _note(fixture_vault, f"{PLAYBOOK}/Oldest.md", "Oldest plan.")
+    session = VaultSession()
+
+    session.begin(emma_vault)
+
+    assert "Middle plan." in session.context
+    assert "Oldest plan." not in session.context
+
+
+def test_current_note_outside_the_read_folders_is_skipped(
+    emma_vault: Path, fixture_vault: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A pointer cannot bring in a note that the profile may not read; the pointer itself still loads."""
+    _note(fixture_vault, f"{PLAYBOOK}/Current.md", "Pointer only.", current="[[Private/Secret]]")
+    _note(fixture_vault, "Private/Secret.md", "Secret plan.")
+    session = VaultSession()
+
+    session.begin(emma_vault)
+
+    assert "Secret plan." not in session.context
+    assert "Pointer only." in session.context
+    assert "Skipping the current_note of session context note" in caplog.text
+
+
+def test_context_cap_keeps_the_current_note_before_its_pointer(emma_vault: Path, fixture_vault: Path) -> None:
+    """When the cap binds, the current note keeps its room and the pointer body is cut."""
+    _note(fixture_vault, f"{PLAYBOOK}/Current.md", "Pointer only.", current=f"[[{PLAYBOOK}/Big]]")
+    _note(fixture_vault, f"{PLAYBOOK}/Big.md", "Big plan. " + "y" * 20000)
+    session = VaultSession()
+
+    session.begin(emma_vault)
+
+    assert "Big plan." in session.context
+    assert "Pointer only." not in session.context
+    assert len(session.context) <= SESSION_CONTEXT_MAX_CHARS + 40
+    assert session.context.endswith("</vault-note>\n\n[Vault context truncated.]")
+
+
+def test_rules_wording_follows_the_profiles_vault_tools(emma_vault: Path) -> None:
+    """A profile without vault tools is told that the app saves its notes, not that it writes them."""
+    with_tools = VaultSession()
+    with_tools.begin(emma_vault)
+    write_profile_tool_override("Emma", ["camera"], emma_vault)
+    without_tools = VaultSession()
+    without_tools.begin(emma_vault)
+
+    assert "You write as `agent/emma` with the vault tools." in with_tools.context
+    assert "You have no vault tools" not in with_tools.context
+    assert "The app saves your session notes when the session ends." in without_tools.context
+    assert "You have no vault tools; do not try to read or write notes." in without_tools.context
+    assert "with the vault tools." not in without_tools.context
 
 
 def test_session_start_loads_capped_context_once(emma_vault: Path, fixture_vault: Path) -> None:

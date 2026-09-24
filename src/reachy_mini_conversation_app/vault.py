@@ -53,6 +53,7 @@ _DATETIME_TEXT = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?")
 _SCHEMA_BLOCK = re.compile(r"^```yaml vault-schema[ \t]*\r?\n(.*?)^```[ \t]*\r?$", re.MULTILINE | re.DOTALL)
 _FRONTMATTER = re.compile(r"\A---[ \t]*\r?\n(.*?)(?:\r?\n)?^---[ \t]*(?:\r?\n|\Z)", re.MULTILINE | re.DOTALL)
 _FRONTMATTER_START = re.compile(r"---[ \t]*\r?\n")
+_WIKILINK = re.compile(r"\[\[([^\[\]]+)\]\]")
 PLACEHOLDER = re.compile(r"\{([a-z_]+)\}")
 NAME_PLACEHOLDERS = frozenset({"date", "slug", "title", "week", "month", "year", "quarter", "time"})
 # Obvious credentials only. A match refuses the write; the message names the pattern, never the text.
@@ -384,6 +385,38 @@ def _schema_agent(schema: Schema, agent: str) -> AgentAccess:
     if access is None:
         raise RefusedError(f"agent `{agent}` is not in the schema `agents` section")
     return access
+
+
+def resolve_wikilink(vault: Vault, link: str, source: str) -> str:
+    """Return the vault-relative note path of a `[[wikilink]]` from note `source` (contract section 5)."""
+    match = _WIKILINK.fullmatch(link.strip())
+    if match is None:
+        raise VaultError("value is not one wikilink")
+    target = re.split(r"[#^|]", match.group(1), maxsplit=1)[0].strip()
+    if not target:
+        raise VaultError("wikilink has no target")
+    name = target if target.endswith(".md") else f"{target}.md"
+    if "/" in target:
+        return name
+    # A plain name matches the note base name; with several matches, the one closest to the source wins.
+    root = vault.root.resolve()
+    matches = []
+    for directory, dirnames, filenames in os.walk(root):
+        dirnames[:] = [dirname for dirname in dirnames if not dirname.startswith(".")]
+        if name in filenames:
+            matches.append((Path(directory) / name).relative_to(root).as_posix())
+    if not matches:
+        raise VaultError(f"no note named `{name}`")
+    source_parts = source.split("/")[:-1]
+
+    def distance(path: str) -> tuple[int, int, str]:
+        parts = path.split("/")[:-1]
+        shared = next(
+            (i for i, (a, b) in enumerate(zip(parts, source_parts)) if a != b), min(len(parts), len(source_parts))
+        )
+        return (len(parts) - shared + len(source_parts) - shared, len(parts), path)
+
+    return min(matches, key=distance)
 
 
 def _read_note_prefix(target: Path, body_max_chars: int) -> tuple[dict[str, object] | None, str, bool]:

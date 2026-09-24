@@ -16,11 +16,13 @@ from reachy_mini_conversation_app.vault import (
     write_note,
     query_notes,
     covers_folder,
+    resolve_wikilink,
     fill_placeholders,
 )
 from reachy_mini_conversation_app.config import config
 from reachy_mini_conversation_app.obsidian_sync import current_vault_path
 from reachy_mini_conversation_app.profile_store import canonical_profile_name
+from reachy_mini_conversation_app.profile_toolsets import read_profile_tool_names
 from reachy_mini_conversation_app.profile_vault_access import (
     SessionNoteTarget,
     ProfileVaultAccess,
@@ -35,6 +37,8 @@ TRANSCRIPT_MAX_CHARS = 20000
 AGENTS_FILENAME = "AGENTS.md"
 # The agent section can sit anywhere in AGENTS.md, so this read cap is larger than the context cap.
 AGENTS_MAX_CHARS = 32000
+# A pointer note names the note that is current with this property (contract section 2).
+CURRENT_NOTE_KEY = "current_note"
 _WEEKLY_EXCERPT_TURNS = 3
 _WEEKLY_EXCERPT_CHARS = 200
 _WEEKLY_MAX_LOGS = 200
@@ -60,6 +64,15 @@ class ActiveVault:
     vault: Vault
     profile: str
     access: ProfileVaultAccess
+
+
+def _has_vault_tools(profile: str, instance_path: str | Path | None) -> bool:
+    """Return whether the profile's enabled tools include a vault tool."""
+    try:
+        return any(name.startswith("vault_") for name in read_profile_tool_names(profile, instance_path))
+    except (OSError, RuntimeError, ValueError) as exc:
+        logger.warning("Failed to read tools for personality %s: %s", profile, exc)
+        return False
 
 
 def active_vault(instance_path: str | Path | None, profile: str | None = None) -> ActiveVault:
@@ -110,34 +123,60 @@ def _agent_rules(active: ActiveVault) -> str:
     return ""
 
 
-def build_session_context(active: ActiveVault) -> str:
+def _context_notes(active: ActiveVault) -> dict[str, str]:
+    """Return the `session_context` note bodies by path, each preceded by the note its `current_note` names."""
+    access = active.access
+    notes: dict[str, str] = {}
+    for path in access.session_context:
+        try:
+            note = read_note(active.vault, path, agent=access.agent, folders=access.read)
+        except (VaultError, OSError) as exc:
+            logger.warning("Skipping session context note %s: %s", path, exc)
+            continue
+        pointer = note.properties.get(CURRENT_NOTE_KEY)
+        if pointer is not None:
+            # One level only: the current note's own `current_note` is not followed.
+            try:
+                if not isinstance(pointer, str):
+                    raise VaultError("value is not one wikilink")
+                target_path = resolve_wikilink(active.vault, pointer, path)
+                target = read_note(active.vault, target_path, agent=access.agent, folders=access.read)
+            except (VaultError, OSError) as exc:
+                logger.warning("Skipping the %s of session context note %s: %s", CURRENT_NOTE_KEY, path, exc)
+            else:
+                # Placed first, so that the context cap cuts the pointer before the note it names.
+                notes.setdefault(target_path, target.body)
+        notes.setdefault(path, note.body)
+    return notes
+
+
+def build_session_context(active: ActiveVault, vault_tools: bool) -> str:
     """Return the capped vault rules, then the `session_context` notes as delimited untrusted data."""
     access = active.access
     schema = active.vault.schema
-    writable = [
-        f"`{name}` ({rule.note_class}; required: {', '.join(rule.required) or 'none'})"
-        for name, rule in schema.types.items()
-        if rule.note_class != "reference" and any(covers_folder(access.write, folder) for folder in rule.folders)
-    ]
-    summary = [
-        f"Vault `{schema.vault}`. You write as `agent/{access.agent}` with the vault tools.",
-        f"Read folders: {', '.join(folder or '.' for folder in access.read) or 'none'}.",
-        f"Write folders: {', '.join(folder or '.' for folder in access.write) or 'none'}.",
-        f"Note types you may write: {', '.join(writable) or 'none'}.",
-    ]
+    if vault_tools:
+        writable = [
+            f"`{name}` ({rule.note_class}; required: {', '.join(rule.required) or 'none'})"
+            for name, rule in schema.types.items()
+            if rule.note_class != "reference" and any(covers_folder(access.write, folder) for folder in rule.folders)
+        ]
+        summary = [
+            f"Vault `{schema.vault}`. You write as `agent/{access.agent}` with the vault tools.",
+            f"Read folders: {', '.join(folder or '.' for folder in access.read) or 'none'}.",
+            f"Write folders: {', '.join(folder or '.' for folder in access.write) or 'none'}.",
+            f"Note types you may write: {', '.join(writable) or 'none'}.",
+        ]
+    else:
+        summary = [
+            f"Vault `{schema.vault}`. The app saves your session notes when the session ends. "
+            "You have no vault tools; do not try to read or write notes."
+        ]
     sections = ["### Vault rules\n\n" + "\n".join(summary)]
     rules = _agent_rules(active)
     if rules:
         sections.append(f"### Rules for {access.agent} (from the vault AGENTS.md)\n\n{rules}")
-    notes: list[tuple[str, str]] = []
-    for path in access.session_context:
-        try:
-            note = read_note(active.vault, path, agent=access.agent, folders=access.read)
-        except VaultError as exc:
-            logger.warning("Skipping session context note %s: %s", path, exc)
-            continue
-        # A note cannot close its own data block.
-        notes.append((path, _NOTE_CLOSE.sub(r"<\\/\1", note.body.strip())))
+    # A note cannot close its own data block.
+    notes = [(path, _NOTE_CLOSE.sub(r"<\\/\1", body.strip())) for path, body in _context_notes(active).items()]
     if notes:
         sections.append(_NOTES_PREAMBLE)
     context = "## Obsidian vault context\n\n" + "\n\n".join(sections)
@@ -182,7 +221,8 @@ class VaultSession:
         self.turns = []
         self.context = ""
         try:
-            self.context = build_session_context(active_vault(instance_path, profile))
+            active = active_vault(instance_path, profile)
+            self.context = build_session_context(active, _has_vault_tools(profile, instance_path))
         except VaultError as exc:
             logger.info("No vault context for this session: %s", exc)
         except OSError as exc:

@@ -105,7 +105,9 @@ async def test_vault_context_is_appended_once_per_wake_session(monkeypatch: pyte
     loads: list[object] = []
     monkeypatch.setattr(vault_session_mod, "active_vault", lambda _instance_path, _profile: "vault")
     monkeypatch.setattr(
-        vault_session_mod, "build_session_context", lambda active: loads.append(active) or f"Vault notes {len(loads)}"
+        vault_session_mod,
+        "build_session_context",
+        lambda active, _vault_tools: loads.append(active) or f"Vault notes {len(loads)}",
     )
     monkeypatch.setattr(realtime_mod, "get_tool_specs", lambda: [])
     monkeypatch.setattr(realtime_mod, "get_session_instructions", lambda _instance_path=None: "Be concise.")
