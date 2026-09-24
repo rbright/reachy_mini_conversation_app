@@ -15,12 +15,12 @@ from pathlib import Path
 from collections.abc import Callable
 
 import numpy as np
+from dotenv import dotenv_values
 from numpy.typing import NDArray
 from scipy.signal import firwin, lfilter
 
 from reachy_mini import ReachyMini
 from reachy_mini.io.jsonrpc import JsonRpcError
-from reachy_mini.apps.jsonrpc_server import JsonRpcServer
 from reachy_mini.media.media_manager import MediaBackend
 from reachy_mini_conversation_app import obsidian_sync
 from reachy_mini_conversation_app.config import (
@@ -69,6 +69,7 @@ from reachy_mini_conversation_app.wake_word import (
     matches_sleep_phrase,
 )
 from reachy_mini_conversation_app.obsidian_sync import ObsidianSyncError
+from reachy_mini_conversation_app.settings_auth import SettingsPinGuard, SettingsRpcServer
 from reachy_mini_conversation_app.startup_settings import read_startup_settings, write_startup_settings
 from reachy_mini_conversation_app.tools.core_tools import initialize_tools
 from reachy_mini_conversation_app.tool_space_routes import register_tool_space_methods
@@ -236,7 +237,7 @@ class LocalStream:
         # JSON-RPC control surface (mounted at /rpc in _init_settings_ui_if_needed).
         # Notifications (conversation.turn/phase/transcript/activity) are pushed
         # here from activity + transcripts. Survives handler rebuilds (mounted once).
-        self._rpc: Optional[JsonRpcServer] = None
+        self._rpc: Optional[SettingsRpcServer] = None
         self._last_turn_state: Optional[str] = None
         # Per-role throttle timestamps for conversation.level (orb audio meter).
         self._last_level_emit: dict[str, float] = {}
@@ -576,6 +577,15 @@ class LocalStream:
         except Exception as e:
             logger.warning("Failed to persist %s: %s", ", ".join(sorted(normalized_updates)), e)
 
+    def _persist_env_values_or_raise(self, updates: dict[str, str]) -> None:
+        """Persist values like `_persist_env_values`; raise `OSError` unless the instance `.env` now holds them."""
+        self._persist_env_values(updates)
+        env_path = Path(self._instance_path) / ".env" if self._instance_path else None
+        saved = dotenv_values(env_path) if env_path is not None and env_path.is_file() else {}
+        missing = sorted(name for name, value in updates.items() if saved.get(name) != value)
+        if missing:
+            raise OSError(f"{', '.join(missing)} not saved to the instance .env")
+
     def _remove_persisted_env_values(self, env_names: tuple[str, ...]) -> None:
         """Remove keys from the instance `.env` without mutating the current runtime."""
         normalized_names = tuple(sorted({name.strip() for name in env_names if name and name.strip()}))
@@ -766,14 +776,14 @@ class LocalStream:
         # The single wire format both the local browser UI and remote WebRTC
         # clients use (the daemon relays it over the DataChannel). Notifications
         # (conversation.turn/phase/transcript/activity) are pushed from activity.
-        rpc = JsonRpcServer()
+        # Privileged settings methods need the settings PIN (see settings_auth).
+        rpc = SettingsRpcServer(SettingsPinGuard(self._persist_env_values_or_raise))
 
-        # SDK isn't marked py.typed, so mypy sees rpc.method as untyped; safe here.
-        @rpc.method("conversation.status")  # type: ignore[untyped-decorator]
+        @rpc.method("conversation.status")
         def _rpc_status(_params: dict[str, object]) -> dict[str, object]:
             return _status_payload()
 
-        @rpc.method("conversation.say")  # type: ignore[untyped-decorator]
+        @rpc.method("conversation.say")
         async def _rpc_say(params: dict[str, object]) -> dict[str, object]:
             text = str(params.get("text", "")).strip()
             if not text:
@@ -784,7 +794,7 @@ class LocalStream:
             await self.handler.say(text)
             return {"ok": True}
 
-        @rpc.method("conversation.interrupt")  # type: ignore[untyped-decorator]
+        @rpc.method("conversation.interrupt")
         def _rpc_interrupt(_params: dict[str, object]) -> dict[str, object]:
             if not self.handler._is_connected():
                 raise JsonRpcError("no active session", reason="not_running")
@@ -793,14 +803,14 @@ class LocalStream:
             rpc.broadcast_threadsafe("conversation.turn", {"state": "listening", "reason": "interrupted"})
             return {"ok": True}
 
-        @rpc.method("conversation.mic")  # type: ignore[untyped-decorator]
+        @rpc.method("conversation.mic")
         def _rpc_mic(params: dict[str, object]) -> dict[str, object]:
             if "muted" in params:
                 self._mic_muted = bool(params["muted"])
                 logger.info("Microphone %s via /rpc", "muted" if self._mic_muted else "unmuted")
             return {"muted": self._mic_muted}
 
-        @rpc.method("backend.config")  # type: ignore[untyped-decorator]
+        @rpc.method("backend.config")
         async def _rpc_backend_config(params: dict[str, object]) -> dict[str, object]:
             backend = str(params.get("backend") or get_backend_choice()).strip().lower()
             if backend not in {HF_BACKEND, OPENAI_BACKEND}:
@@ -854,11 +864,11 @@ class LocalStream:
                 message = "Backend saved. Restart Reachy Mini Conversation from the desktop app to apply it."
             return {"ok": True, "message": message, **_status_payload()}
 
-        @rpc.method("obsidian.status")  # type: ignore[untyped-decorator]
+        @rpc.method("obsidian.status")
         def _rpc_obsidian_status(_params: dict[str, object]) -> dict[str, object]:
             return obsidian_sync.supervisor.status()
 
-        @rpc.method("obsidian.login")  # type: ignore[untyped-decorator]
+        @rpc.method("obsidian.login")
         async def _rpc_obsidian_login(params: dict[str, object]) -> dict[str, object]:
             email = str(params.get("email") or "").strip()
             password = str(params.get("password") or "")
@@ -874,7 +884,7 @@ class LocalStream:
             await asyncio.to_thread(obsidian_sync.supervisor.restart)
             return {"ok": True, "message": message, **obsidian_sync.supervisor.status()}
 
-        @rpc.method("obsidian.list_vaults")  # type: ignore[untyped-decorator]
+        @rpc.method("obsidian.list_vaults")
         async def _rpc_obsidian_list_vaults(_params: dict[str, object]) -> dict[str, object]:
             try:
                 vaults = await obsidian_sync.supervisor.list_vaults()
@@ -882,7 +892,7 @@ class LocalStream:
                 raise JsonRpcError(str(e), reason="obsidian_list_failed") from None
             return {"vaults": vaults}
 
-        @rpc.method("obsidian.configure")  # type: ignore[untyped-decorator]
+        @rpc.method("obsidian.configure")
         async def _rpc_obsidian_configure(params: dict[str, object]) -> dict[str, object]:
             texts = {
                 name: str(params.get(name) or "").strip()
@@ -932,7 +942,7 @@ class LocalStream:
             await asyncio.to_thread(obsidian_sync.supervisor.restart)
             return {"ok": True, "message": "Obsidian Sync settings saved.", **obsidian_sync.supervisor.status()}
 
-        @rpc.method("obsidian.logout")  # type: ignore[untyped-decorator]
+        @rpc.method("obsidian.logout")
         async def _rpc_obsidian_logout(_params: dict[str, object]) -> dict[str, object]:
             try:
                 await obsidian_sync.supervisor.logout()

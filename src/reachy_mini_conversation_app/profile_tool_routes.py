@@ -18,6 +18,7 @@ from reachy_mini_conversation_app.profile_store import (
     canonical_profile_name,
     profile_directory_has_definition,
 )
+from reachy_mini_conversation_app.settings_auth import SettingsRpcServer
 from reachy_mini_conversation_app.tool_settings import (
     RestartCallback,
     apply_tool_change,
@@ -90,7 +91,7 @@ def _profile_tool_payload(
 
 
 def register_profile_tool_methods(
-    rpc: JsonRpcServer,
+    rpc: JsonRpcServer | SettingsRpcServer,
     get_loop: Callable[[], asyncio.AbstractEventLoop | None],
     restart_conversation: RestartCallback,
     *,

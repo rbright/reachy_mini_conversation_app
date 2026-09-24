@@ -21,11 +21,17 @@ from fastapi.testclient import TestClient
 import reachy_mini_conversation_app.console as console_mod
 import reachy_mini_conversation_app.vault_session as vault_session_mod
 from reachy_mini_conversation_app import obsidian_sync
-from reachy_mini_conversation_app.config import HF_AVAILABLE_VOICES, OPENAI_AVAILABLE_VOICES, config
+from reachy_mini_conversation_app.config import (
+    HF_AVAILABLE_VOICES,
+    SETTINGS_PIN_HASH_ENV,
+    OPENAI_AVAILABLE_VOICES,
+    config,
+)
 from reachy_mini_conversation_app.console import LocalStream
 from reachy_mini_conversation_app.streaming import AdditionalOutputs
 from reachy_mini_conversation_app.wake_word import WakeWordEvent
 from reachy_mini_conversation_app.obsidian_sync import ObsidianSyncSupervisor
+from reachy_mini_conversation_app.settings_auth import PRIVILEGED_METHODS, SETTINGS_PIN_PARAM, hash_settings_pin
 from reachy_mini_conversation_app.vault_session import VaultSession
 from reachy_mini_conversation_app.startup_settings import (
     StartupSettings,
@@ -42,6 +48,10 @@ from reachy_mini_conversation_app.profile_vault_access import (
 )
 
 
+_SETTINGS_PIN = "test-settings-pin"
+_SETTINGS_PIN_HASH = hash_settings_pin(_SETTINGS_PIN)
+
+
 @pytest.fixture(autouse=True)
 def restore_environment_and_config() -> Iterator[None]:
     """Restore `os.environ` and `config` after each test; settings handlers write both."""
@@ -56,10 +66,22 @@ def restore_environment_and_config() -> Iterator[None]:
     vars(config).update(settings)
 
 
+@pytest.fixture(autouse=True)
+def settings_pin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Set a settings PIN; `_rpc_call` sends it with privileged methods."""
+    monkeypatch.setenv(SETTINGS_PIN_HASH_ENV, _SETTINGS_PIN_HASH)
+
+
 def _rpc_call(app: FastAPI, method: str, params: Any = None) -> dict[str, Any]:
-    """Send one JSON-RPC request over /rpc and return the response envelope."""
+    """Send one JSON-RPC request over /rpc and return the response envelope.
+
+    A privileged method gets the test settings PIN.
+    """
+    params = dict(params or {})
+    if method in PRIVILEGED_METHODS:
+        params[SETTINGS_PIN_PARAM] = _SETTINGS_PIN
     with TestClient(app).websocket_connect("/rpc") as ws:
-        ws.send_json({"jsonrpc": "2.0", "id": "1", "method": method, "params": params or {}})
+        ws.send_json({"jsonrpc": "2.0", "id": "1", "method": method, "params": params})
         return ws.receive_json()
 
 

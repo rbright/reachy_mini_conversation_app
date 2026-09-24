@@ -1,5 +1,7 @@
 /** JSON-RPC-over-WebSocket client for the settings backend (/rpc). */
 
+import { askSettingsPin } from "./components/pin-dialog.js";
+
 const DEFAULT_TIMEOUT_MS = 8000;
 const TOOL_SPACE_TIMEOUT_MS = 60000;
 // `ob` commands reach Obsidian's servers, and saving waits for the sync process to stop (up to ~30 s).
@@ -74,11 +76,9 @@ function handleMessage(msg) {
   }
 }
 
-/** Call a JSON-RPC method and await its result. Rejects with RpcError. */
-export async function rpcCall(method, params = {}, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
-  await connect();
+function send(method, params, timeoutMs) {
   if (!socket || socket.readyState !== WebSocket.OPEN) {
-    throw new RpcError("not connected", "disconnected");
+    return Promise.reject(new RpcError("not connected", "disconnected"));
   }
   const id = `ui-${++rpcCounter}`;
   return new Promise((resolve, reject) => {
@@ -89,6 +89,48 @@ export async function rpcCall(method, params = {}, { timeoutMs = DEFAULT_TIMEOUT
     pending.set(id, { resolve, reject, timer });
     socket.send(JSON.stringify({ jsonrpc: "2.0", id, method, params }));
   });
+}
+
+// The server refuses privileged settings methods with these reasons until the call carries the settings PIN.
+const PIN_REASONS = new Set(["settings_pin_not_set", "settings_pin_required", "settings_pin_invalid"]);
+const pinMethods = new Set(); // methods that asked for the PIN; only these calls carry it
+let settingsPin = ""; // kept in memory for this page only
+let pinRequest = null; // one dialog for concurrent calls
+
+function obtainSettingsPin(reason) {
+  pinRequest ??= (async () => {
+    const create = reason === "settings_pin_not_set";
+    const pin = await askSettingsPin({ create, retry: reason === "settings_pin_invalid" });
+    if (pin && create) {
+      await connect();
+      await send("settings.set_pin", { pin }, DEFAULT_TIMEOUT_MS);
+    }
+    return pin;
+  })().finally(() => {
+    pinRequest = null;
+  });
+  return pinRequest;
+}
+
+/** Call a JSON-RPC method and await its result. Rejects with RpcError.
+ * A privileged settings method asks the user for the settings PIN and then retries. */
+export async function rpcCall(method, params = {}, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+  for (;;) {
+    await connect();
+    const usedPin = pinMethods.has(method) ? settingsPin : "";
+    try {
+      return await send(method, usedPin ? { ...params, settings_pin: usedPin } : params, timeoutMs);
+    } catch (error) {
+      if (!PIN_REASONS.has(error.reason)) throw error;
+      pinMethods.add(method);
+      // Another call got a PIN while this one was in flight: retry with it.
+      if (settingsPin && settingsPin !== usedPin) continue;
+      settingsPin = "";
+      const pin = await obtainSettingsPin(error.reason);
+      if (!pin) throw error;
+      settingsPin = pin;
+    }
+  }
 }
 
 /** Subscribe to a one-way notification (event). Returns an unsubscribe fn. */
@@ -200,6 +242,13 @@ const ERROR_MESSAGES = Object.freeze({
   invalid_obsidian_mode: "Choose a supported sync mode.",
   invalid_obsidian_conflict_strategy: "Choose a supported conflict strategy.",
   invalid_obsidian_path: "Enter an absolute local path, or leave it blank for the default.",
+  settings_pin_not_set: "Set a settings PIN to change this setting.",
+  settings_pin_required: "Enter the settings PIN to change this setting.",
+  settings_pin_invalid: "Wrong settings PIN.",
+  settings_pin_locked: "Too many wrong PINs. Wait one minute, then try again.",
+  settings_pin_already_set: "A settings PIN is already set. Enter it to continue.",
+  settings_pin_too_short: "Use a settings PIN of 6 or more characters.",
+  settings_pin_not_saved: "The robot could not save the settings PIN. Check the app folder, then try again.",
 });
 
 /** Map a thrown error to user-facing copy, falling back to its raw message. */
