@@ -97,6 +97,22 @@ def test_write_refuses_system_folder_in_any_letter_case(fixture_vault: Path) -> 
     assert not (fixture_vault / "SYSTEM").exists()
 
 
+def test_write_refuses_impossible_datetime_values(fixture_vault: Path) -> None:
+    """A datetime value needs a real calendar date and clock time, not only the right shape."""
+    schema = fixture_vault / "System/Schema.md"
+    schema.write_text(
+        schema.read_text(encoding="utf-8").replace(
+            "  confidence: text\n", "  confidence: text\n  seen_at: datetime\n"
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RefusedError, match="`seen_at` must be of type datetime"):
+        _write(fixture_vault, "Emma/Research/bad-time.md", {"type": "research", "seen_at": "2026-99-99T25:61"})
+    assert not (fixture_vault / "Emma/Research/bad-time.md").exists()
+    assert _write(fixture_vault, "Emma/Research/good-time.md", {"type": "research", "seen_at": "2026-09-23T14:05"})
+
+
 @pytest.mark.parametrize(
     "path",
     [

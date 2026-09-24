@@ -312,9 +312,15 @@ def _type_ok(kind: KeyType, value: object) -> bool:
                 isinstance(value, str) and _DATE_TEXT.fullmatch(value) is not None
             )
         case "datetime":
-            return isinstance(value, datetime) or (
-                isinstance(value, str) and _DATETIME_TEXT.fullmatch(value) is not None
-            )
+            if isinstance(value, datetime):
+                return True
+            if not (isinstance(value, str) and _DATETIME_TEXT.fullmatch(value)):
+                return False
+            try:
+                datetime.fromisoformat(value)
+            except ValueError:
+                return False
+            return True
 
 
 def schema_errors(schema: Schema, path: str, properties: Mapping[str, object]) -> list[str]:
