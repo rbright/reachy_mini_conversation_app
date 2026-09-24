@@ -64,11 +64,13 @@ def configured_vault_path() -> Path | None:
 
 
 def current_vault_path() -> Path | None:
-    """Return the local vault directory when Obsidian Sync is enabled and the directory exists."""
+    """Return the local vault directory once Obsidian Sync has confirmed that it is linked to the configured vault."""
     if not config.OBSIDIAN_SYNC_ENABLED:
         return None
     path = configured_vault_path()
-    return path if path is not None and path.is_dir() else None
+    if path is None or supervisor.linked != (config.OBSIDIAN_SYNC_VAULT, path):
+        return None
+    return path if path.is_dir() else None
 
 
 def _redact(text: str, secrets: tuple[str | None, ...]) -> str:
@@ -85,6 +87,15 @@ def _require_executable() -> str:
     return executable
 
 
+async def _spawn_ob(executable: str, args: list[str], *, stdin: int, stderr: int) -> asyncio.subprocess.Process:
+    try:
+        return await asyncio.create_subprocess_exec(
+            executable, *args, stdin=stdin, stdout=asyncio.subprocess.PIPE, stderr=stderr
+        )
+    except OSError as error:
+        raise ObsidianSyncError(f"Cannot run Obsidian Headless ({executable}): {error.strerror or error}") from None
+
+
 async def _run_ob(
     executable: str,
     args: list[str],
@@ -94,11 +105,10 @@ async def _run_ob(
 ) -> _ObResult:
     """Run one `ob` command to completion and return its redacted output."""
     # Without stdin text, stdin is empty so that an unexpected `ob` prompt reads EOF instead of blocking.
-    process = await asyncio.create_subprocess_exec(
+    process = await _spawn_ob(
         executable,
-        *args,
+        args,
         stdin=asyncio.subprocess.PIPE if stdin_text is not None else asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
     try:
@@ -143,6 +153,11 @@ class ObsidianSyncSupervisor:
         self._signed_in: bool | None = None
         self._last_sync: str | None = None
         self._last_error: str | None = None
+        # The (vault, path) that `ob` last confirmed as linked; vault files are exposed only for this pair.
+        self.linked: tuple[str, Path] | None = None
+        # Clear while a start has not yet checked the vault link, so that a session start can wait for the vault.
+        self._link_checked = threading.Event()
+        self._link_checked.set()
 
     def status(self) -> dict[str, object]:
         """Return the sync status and non-secret settings for the settings UI."""
@@ -174,8 +189,10 @@ class ObsidianSyncSupervisor:
             self._last_error = None
             if not config.OBSIDIAN_SYNC_ENABLED:
                 self._state = "stopped"
+                self._link_checked.set()
                 return
             self._state = "starting"
+            self._link_checked.clear()
             loop = asyncio.new_event_loop()
             task = loop.create_task(self._supervise(), name="obsidian-sync")
             thread = threading.Thread(target=self._run_loop, args=(loop, task), name="obsidian-sync", daemon=True)
@@ -187,6 +204,7 @@ class ObsidianSyncSupervisor:
         with self._lock:
             loop, task, thread = self._loop, self._task, self._thread
             self._loop = self._task = self._thread = None
+            self._link_checked.set()
             if loop is None or task is None or thread is None:
                 return
             try:
@@ -200,6 +218,10 @@ class ObsidianSyncSupervisor:
         with self._lock:
             self.stop()
             self.start()
+
+    def wait_for_link_check(self, timeout: float) -> None:
+        """Wait until the running start has checked the vault link, for at most `timeout` seconds."""
+        self._link_checked.wait(timeout)
 
     def shutdown(self) -> None:
         """Stop syncing for good: a later start or restart does nothing."""
@@ -300,6 +322,7 @@ class ObsidianSyncSupervisor:
             self._state = "stopped"
             self._last_error = str(error)
             logger.warning("%s Obsidian Sync is off; the conversation is not affected.", self._last_error)
+            self._link_checked.set()
             return
         vault = config.OBSIDIAN_SYNC_VAULT
         path = configured_vault_path()
@@ -307,6 +330,7 @@ class ObsidianSyncSupervisor:
             self._state = "error"
             self._last_error = "Choose a remote vault and a local path."
             logger.warning("Obsidian Sync is enabled but not configured: %s", self._last_error)
+            self._link_checked.set()
             return
 
         password = config.OBSIDIAN_SYNC_E2EE_PASSWORD
@@ -317,10 +341,12 @@ class ObsidianSyncSupervisor:
                 reached_sync = False
                 try:
                     await self._prepare_vault(executable, vault, path, password)
+                    self._link_checked.set()
                     returncode, last_line, reached_sync = await self._run_sync(executable, path, password)
                     self._last_error = f"ob sync exited with code {returncode}: {last_line or 'no output'}"
                 except ObsidianSyncError as error:
                     self._last_error = str(error)
+                    self._link_checked.set()
                 failures = 1 if reached_sync else failures + 1
                 delay = self._restart_delays_seconds[min(failures, len(self._restart_delays_seconds)) - 1]
                 self._state = "error"
@@ -341,8 +367,10 @@ class ObsidianSyncSupervisor:
                 raise ObsidianSyncError(f"Unexpected ob sync-status output: {error}") from None
             linked_to = {linked.get("vaultId"), linked.get("vaultName")} if isinstance(linked, dict) else set()
             if vault not in linked_to:
+                self.linked = None
                 raise ObsidianSyncError(f"{path} is linked to another vault. Choose another local path.")
         else:
+            self.linked = None
             logger.info("Linking %s to Obsidian vault %s", path, vault)
             vault_id = await self._unlink_other_paths(executable, vault, path)
             # `ob sync-setup` prompts for the E2EE password on stdin (see login); it asks only for E2EE vaults.
@@ -365,6 +393,7 @@ class ObsidianSyncSupervisor:
                     self._signed_in = False
                 raise ObsidianSyncError(f"ob sync-setup failed: {setup.message}")
             self._signed_in = True
+        self.linked = (vault, path)
 
         sync_config = await _run_ob(
             executable,
@@ -386,14 +415,10 @@ class ObsidianSyncSupervisor:
 
     async def _run_sync(self, executable: str, path: Path, password: str | None) -> tuple[int, str, bool]:
         """Run `ob sync --continuous` until it exits; return its exit code, last line, and whether it synced."""
-        process = await asyncio.create_subprocess_exec(
+        process = await _spawn_ob(
             executable,
-            "sync",
-            "--continuous",
-            "--path",
-            str(path),
+            ["sync", "--continuous", "--path", str(path)],
             stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
         last_line = ""

@@ -9,6 +9,7 @@ import re
 import time
 import asyncio
 import logging
+import contextlib
 from math import gcd
 from typing import Any, List, Optional
 from pathlib import Path
@@ -475,19 +476,20 @@ class LocalStream:
         except Exception as e:
             logger.debug("Active handler shutdown ignored during restart: %s", e)
 
-    async def request_backend_restart(self, reason: str) -> None:
-        """Ask the stream loop to rebuild the backend and stop the current handler."""
+    async def request_backend_restart(self, reason: str, *, rebuild: bool = True) -> None:
+        """Stop the current handler and ask the stream loop to rebuild the backend, unless `rebuild` is false."""
         loop = self._asyncio_loop
         if loop is not None and loop.is_running() and asyncio.get_running_loop() is not loop:
-            future = asyncio.run_coroutine_threadsafe(self.request_backend_restart(reason), loop)
+            future = asyncio.run_coroutine_threadsafe(self.request_backend_restart(reason, rebuild=rebuild), loop)
             await asyncio.wrap_future(future)
             return
 
         logger.info("Backend restart requested: %s", reason)
         self._set_backend_connection_state("connecting")
-        if self._wake_word_detector is not None and not self._wake_gate_open:
-            self._wake_handler_ready.clear()
-        self._restart_requested.set()
+        if rebuild:
+            if self._wake_word_detector is not None and not self._wake_gate_open:
+                self._wake_handler_ready.clear()
+            self._restart_requested.set()
         await self._shutdown_active_handler()
 
     async def _sleep_or_restart_requested(self, delay: float) -> None:
@@ -932,14 +934,32 @@ class LocalStream:
                 elif name in params:
                     cleared.append(env_name)
 
-            if cleared:
-                # Removed from the instance `.env` first, so that the reload in `_persist_env_values` cannot restore them.
-                self._remove_persisted_env_values(tuple(cleared))
-                for env_name in cleared:
-                    os.environ.pop(env_name, None)
-                refresh_runtime_config_from_env()
-            self._persist_env_values(updates)
-            await asyncio.to_thread(obsidian_sync.supervisor.restart)
+            # A session never spans a vault change: it ends under the old settings, and the next one begins after it.
+            vault_changed = (
+                ("enabled" in params and (params["enabled"] is True) != config.OBSIDIAN_SYNC_ENABLED)
+                or (bool(texts["vault"]) and texts["vault"] != config.OBSIDIAN_SYNC_VAULT)
+                or (
+                    "path" in params
+                    and Path(texts["path"]).expanduser() != Path(config.OBSIDIAN_SYNC_PATH or "").expanduser()
+                )
+            )
+            vault_session = self.handler.deps.vault_session
+            with vault_session.vault_change() if vault_changed else contextlib.nullcontext():
+                if vault_changed:
+                    # Without a rebuild, the stream loop reconnects the same handler after its retry delay.
+                    await self.request_backend_restart("obsidian_vault_changed", rebuild=False)
+                    await asyncio.to_thread(vault_session.end, self._instance_path)
+
+                if cleared:
+                    # Removed from the instance `.env` first, so that the reload in `_persist_env_values` cannot restore them.
+                    self._remove_persisted_env_values(tuple(cleared))
+                    for env_name in cleared:
+                        os.environ.pop(env_name, None)
+                    refresh_runtime_config_from_env()
+                self._persist_env_values(updates)
+                await asyncio.to_thread(obsidian_sync.supervisor.restart)
+            if vault_changed and self._can_rebuild_handler():
+                await self.request_backend_restart("obsidian_vault_changed")
             return {"ok": True, "message": "Obsidian Sync settings saved.", **obsidian_sync.supervisor.status()}
 
         @rpc.method("obsidian.logout")

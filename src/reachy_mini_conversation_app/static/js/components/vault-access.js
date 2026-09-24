@@ -12,7 +12,7 @@ export function buildProfileVaultAccessSection({ signal } = {}) {
     disabled: "disabled",
     "aria-label": "Personality to configure",
   });
-  const agentInput = textInput("vault_agent", "Agent id in the vault schema, for example emma");
+  const agentInput = textInput("vault_agent", "Agent id in the vault schema, for example tutor");
   const readInput = linesInput("vault_read", "One vault folder per line");
   const writeInput = linesInput("vault_write", "One vault folder per line");
   const contextInput = linesInput("vault_session_context", "One note path per line, read at session start");

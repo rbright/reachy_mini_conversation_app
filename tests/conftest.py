@@ -41,28 +41,28 @@ keys:
   week_of: date
   confidence: text
 types:
-  emma-session: {class: log, folders: [Emma/Sessions], name: "{date}-{slug}", required: [date]}
-  emma-memory: {class: log, folders: [Emma/Weekly Memories], name: "{date}", required: [date, week_of]}
-  emma-playbook: {class: log, folders: [Emma/Conversation Playbook], name: "Conversation Playbook - {date}"}
-  research: {class: artifact, folders: [Emma/Research], name: "{slug}", values: {confidence: [low, high]}}
-  task: {class: record, folders: [Emma/Tasks], name: "{title}"}
-  source: {class: reference, folders: [Emma/Sources], name: "{title}"}
+  tutor-session: {class: log, folders: [Tutor/Sessions], name: "{date}-{slug}", required: [date]}
+  tutor-memory: {class: log, folders: [Tutor/Weekly Memories], name: "{date}", required: [date, week_of]}
+  tutor-playbook: {class: log, folders: [Tutor/Conversation Playbook], name: "Conversation Playbook - {date}"}
+  research: {class: artifact, folders: [Tutor/Research], name: "{slug}", values: {confidence: [low, high]}}
+  task: {class: record, folders: [Tutor/Tasks], name: "{title}"}
+  source: {class: reference, folders: [Tutor/Sources], name: "{title}"}
 agents:
-  emma:
-    read: [".", Emma/Conversation Playbook, Emma/Sessions, Emma/Weekly Memories, Emma/Research, Private]
-    write: [Emma/Sessions, Emma/Weekly Memories, Emma/Research, Emma/Tasks, Emma/Sources, Private]
+  tutor:
+    read: [".", Tutor/Conversation Playbook, Tutor/Sessions, Tutor/Weekly Memories, Tutor/Research, Private]
+    write: [Tutor/Sessions, Tutor/Weekly Memories, Tutor/Research, Tutor/Tasks, Tutor/Sources, Private]
 ```
 """
 
 FIXTURE_AGENTS = """# AGENTS.md
 
-## Mira
+## Planner
 
-Mira plans the week.
+Planner plans the week.
 
-## Emma
+## Tutor
 
-Emma writes one session log per conversation.
+Tutor writes one session log per conversation.
 
 ### Tone
 
@@ -81,19 +81,19 @@ def fixture_vault(tmp_path: Path) -> Path:
     (vault / "System").mkdir(parents=True)
     (vault / "System" / "Schema.md").write_text(FIXTURE_SCHEMA, encoding="utf-8")
     (vault / "AGENTS.md").write_text(FIXTURE_AGENTS, encoding="utf-8")
-    playbook = vault / "Emma" / "Conversation Playbook"
+    playbook = vault / "Tutor" / "Conversation Playbook"
     playbook.mkdir(parents=True)
     (playbook / "Current.md").write_text(
-        "---\ntype: emma-playbook\ncreated: 2026-09-19\n---\nAsk about the dinosaur book.\n", encoding="utf-8"
+        "---\ntype: tutor-playbook\ncreated: 2026-09-19\n---\nAsk about the dinosaur book.\n", encoding="utf-8"
     )
-    research = vault / "Emma" / "Research"
+    research = vault / "Tutor" / "Research"
     research.mkdir(parents=True)
     (research / "approved-topic.md").write_text(
-        "---\ntype: research\ncreated: 2026-09-01\nstatus: approved\nauthor: human/ryan\nrun: manual\n---\nDone.\n",
+        "---\ntype: research\ncreated: 2026-09-01\nstatus: approved\nauthor: human/owner\nrun: manual\n---\nDone.\n",
         encoding="utf-8",
     )
     (research / "draft-topic.md").write_text(
-        "---\ntype: research\ncreated: 2026-09-02\nstatus: draft\nauthor: agent/emma\nrun: reachy:emma:s0\n---\nWIP.\n",
+        "---\ntype: research\ncreated: 2026-09-02\nstatus: draft\nauthor: agent/tutor\nrun: reachy:tutor:s0\n---\nWIP.\n",
         encoding="utf-8",
     )
     return vault

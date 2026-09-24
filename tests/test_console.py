@@ -1095,20 +1095,20 @@ async def test_sleep_phrase_writes_the_session_note(
 ) -> None:
     """The sleep phrase ends the wake session and writes its vault note before the robot sleeps."""
     monkeypatch.setattr(vault_session_mod, "current_vault_path", lambda: fixture_vault)
-    monkeypatch.setattr(config, "REACHY_MINI_CUSTOM_PROFILE", "Emma")
+    monkeypatch.setattr(config, "REACHY_MINI_CUSTOM_PROFILE", "Tutor")
     access = ProfileVaultAccess(
-        agent="emma",
-        read=("Emma/Sessions",),
-        write=("Emma/Sessions",),
-        session_log=SessionNoteTarget(folder="Emma/Sessions", type="emma-session", properties={"date": "{date}"}),
+        agent="tutor",
+        read=("Tutor/Sessions",),
+        write=("Tutor/Sessions",),
+        session_log=SessionNoteTarget(folder="Tutor/Sessions", type="tutor-session", properties={"date": "{date}"}),
     )
-    write_profile_vault_access("Emma", access, tmp_path)
+    write_profile_vault_access("Tutor", access, tmp_path)
     handler = MagicMock()
     handler.output_queue = asyncio.Queue()
     handler.deps.vault_session = VaultSession()
     handler.deps.vault_session.begin(tmp_path)
     handler.deps.vault_session.record("user", "Tell me about owls")
-    sessions = fixture_vault / "Emma" / "Sessions"
+    sessions = fixture_vault / "Tutor" / "Sessions"
     notes_when_sleeping: list[list[Path]] = []
     stream = LocalStream(
         handler,
@@ -1801,3 +1801,48 @@ def test_obsidian_configure_blank_settings_restore_their_defaults(
     persisted = dotenv_values(tmp_path / ".env")
     for name in ("OBSIDIAN_SYNC_PATH", "OBSIDIAN_HEADLESS_BIN", "OBSIDIAN_SYNC_DEVICE_NAME", "OBSIDIAN_SYNC_MODE"):
         assert name not in persisted
+
+
+@pytest.mark.parametrize("rebuildable", [True, False])
+def test_obsidian_vault_change_stops_the_backend_then_ends_the_session_in_the_old_vault(
+    rebuildable: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A vault change stops the backend and holds back session starts until it is done; then it rebuilds if it can."""
+    for name in _OBSIDIAN_CONFIG_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(config, "OBSIDIAN_HEADLESS_BIN", str(tmp_path / "missing-ob"))
+    monkeypatch.setattr(config, "OBSIDIAN_SYNC_VAULT", "Demo")
+    monkeypatch.setattr(config, "INSTANCE_PATH", tmp_path)
+    monkeypatch.setattr(obsidian_sync, "supervisor", ObsidianSyncSupervisor())
+    events: list[str] = []
+    handler = MagicMock()
+    handler.deps.vault_session.end.side_effect = lambda _path: events.append(f"end in {config.OBSIDIAN_SYNC_VAULT}")
+    held = handler.deps.vault_session.vault_change.return_value
+    held.__enter__.side_effect = lambda: events.append("hold")
+    held.__exit__.side_effect = lambda *_exc: events.append(f"release in {config.OBSIDIAN_SYNC_VAULT}")
+    app = FastAPI()
+    stream = LocalStream(
+        handler,
+        _rpc_robot(),
+        settings_app=app,
+        instance_path=str(tmp_path),
+        handler_factory=MagicMock() if rebuildable else None,
+    )
+    monkeypatch.setattr(
+        stream,
+        "request_backend_restart",
+        AsyncMock(side_effect=lambda reason, rebuild=True: events.append("rebuild" if rebuild else "stop")),
+    )
+    stream._init_settings_ui_if_needed()
+
+    _rpc_call(app, "obsidian.configure", {"vault": "Demo", "mode": "pull-only", "path": ""})
+    _rpc_call(app, "obsidian.configure", {"path": str(Path.home())})
+    _rpc_call(app, "obsidian.configure", {"path": "~"})
+    _rpc_call(app, "obsidian.configure", {"vault": "Shared"})
+
+    rebuild = ("rebuild",) if rebuildable else ()
+    assert events == [
+        *("hold", "stop", "end in Demo", "release in Demo", *rebuild),
+        *("hold", "stop", "end in Demo", "release in Shared", *rebuild),
+    ]
+    assert config.OBSIDIAN_SYNC_VAULT == "Shared"

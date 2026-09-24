@@ -42,7 +42,7 @@ def test_delete_removes_user_profile(tmp_path: Path, monkeypatch: pytest.MonkeyP
     _make_user_profile("doomed")
     profile_dir = tmp_path / "user_personalities" / "doomed"
     write_profile_tool_override("user_personalities/doomed", ["dance"], tmp_path)
-    access = ProfileVaultAccess.model_validate({"agent": "emma", "read": ["Emma"]})
+    access = ProfileVaultAccess.model_validate({"agent": "tutor", "read": ["Tutor"]})
     write_profile_vault_access("user_personalities/doomed", access, tmp_path)
     write_profile_vault_access("user_personalities/kept", access, tmp_path)
     assert profile_dir.is_dir()

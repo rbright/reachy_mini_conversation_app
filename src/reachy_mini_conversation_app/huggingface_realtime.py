@@ -754,6 +754,9 @@ class OpenAICompatibleRealtimeHandler(ConversationHandler, ABC):
                 raise
 
             logger.info("Realtime session updated successfully")
+            # `shutdown()` cannot close this connection before it is set below, for example during a vault change.
+            if self._shutting_down:
+                return
 
             # Reset the partial-transcript accumulator for each new session
             self.input_transcript_chunks_by_item = InputTranscriptChunksByItem()

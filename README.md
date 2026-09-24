@@ -203,21 +203,21 @@ Passwords reach `ob` on stdin, not on the command line. The encryption password 
 
 #### Vault access for personalities
 
-The `vault_read`, `vault_query`, and `vault_write` tools use the synced vault. The vault must have a `System/Schema.md` note with one `yaml vault-schema` block (the vault contract). Enable the tools for a personality in Tools → Tool access, then set its vault access in Settings → Vault access. The app stores it in `profile_vault_access.json`, next to `profile_toolsets.json`:
+The `vault_read`, `vault_query`, and `vault_write` tools use the synced vault. The app uses the local folder only after `ob` confirms that the folder is linked to the configured remote vault; a session that starts during that check waits for it for up to 10 s. The vault must have a `System/Schema.md` note with one `yaml vault-schema` block (the vault contract). Enable the tools for a personality in Tools → Tool access, then set its vault access in Settings → Vault access. The app stores it in `profile_vault_access.json`, next to `profile_toolsets.json`:
 
 ```json
 {
   "version": 1,
   "profiles": {
-    "Emma": {
-      "agent": "emma",
-      "read": [".", "Emma/Conversation Playbook", "Emma/Sessions", "Emma/Weekly Memories"],
-      "write": ["Emma/Sessions", "Emma/Weekly Memories"],
-      "session_context": ["Emma/Conversation Playbook/Current.md"],
-      "session_log": {"folder": "Emma/Sessions", "type": "emma-session", "properties": {"date": "{date}"}},
+    "Tutor": {
+      "agent": "tutor",
+      "read": [".", "Tutor/Conversation Playbook", "Tutor/Sessions", "Tutor/Weekly Memories"],
+      "write": ["Tutor/Sessions", "Tutor/Weekly Memories"],
+      "session_context": ["Tutor/Conversation Playbook/Current.md"],
+      "session_log": {"folder": "Tutor/Sessions", "type": "tutor-session", "properties": {"date": "{date}"}},
       "weekly_memory": {
-        "folder": "Emma/Weekly Memories",
-        "type": "emma-memory",
+        "folder": "Tutor/Weekly Memories",
+        "type": "tutor-memory",
         "date_weekday": 5,
         "properties": {"date": "{date}", "week_of": "{week_start}"}
       }
@@ -226,10 +226,10 @@ The `vault_read`, `vault_query`, and `vault_write` tools use the synced vault. T
 }
 ```
 
-- A folder must be in this list and in the `agents` section of the vault schema for the same agent. `.` is the vault root. No agent writes `System/`.
+- A folder must be in this list and in the `agents` section of the vault schema for the same agent. `.` is the vault root. No agent writes `System/`, in any letter case.
 - `vault_write` sets `created`, `author: agent/<agent>`, and `run: reachy:<agent>:<session-id>`, and checks the note type, folder, and keys against the schema. It refuses paths with `..` or symbolic links, non-Markdown files, existing logs and dated notes, `approved` or `superseded` artifacts, and text that looks like a credential. It writes a temporary file and renames it.
 - At session start, the app adds a schema summary and the agent's section of the vault `AGENTS.md` to the instructions as rules. It reads `AGENTS.md` only when the vault root (`.`) is a read folder here and in the schema. When the personality has no `vault_*` tool, the summary says only that the app saves the session notes. Then it adds the `session_context` notes as delimited, untrusted reference data, which the model must not follow as instructions. A context note with a `current_note` wikilink also brings in the note it names (one level, same read folders); that note keeps its room first when the cap binds. The total is 8000 characters at most. Reconnects in the same wake session reuse them; a personality change ends the session and starts a new one.
-- At session end (sleep phrase, app stop, shutdown, or personality change), the app writes one `session_log` note with the transcript. It writes nothing when the user did not speak. The note name comes from the type's `name` rule in the schema; `{slug}` is the start time plus a session id suffix, so each session gets its own note. The session end also writes one `weekly_memory` note for each finished week (up to 8 weeks back) that has session logs and no weekly memory yet. `{date}` in a weekly memory is the `date_weekday` day of that week.
+- At session end (sleep phrase, app stop, shutdown, personality change, or a change of the synced vault, its local path, or sync on/off), the app writes one `session_log` note with the transcript, up to 20000 characters. A vault change then reconnects the conversation, so the new session uses the new vault. The app writes nothing when the user did not speak. The note name comes from the type's `name` rule in the schema; `{slug}` is the start time plus a session id suffix, so each session gets its own note. The session end also writes one `weekly_memory` note for each finished week (up to 8 weeks back) that has session logs and no weekly memory yet. `{date}` in a weekly memory is the `date_weekday` day of that week.
 
 ## Running the app
 

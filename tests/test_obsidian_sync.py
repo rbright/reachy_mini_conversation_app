@@ -4,6 +4,7 @@ import os
 import sys
 import json
 import time
+import asyncio
 import logging
 from typing import Any
 from pathlib import Path
@@ -11,6 +12,7 @@ from collections.abc import Callable
 
 import pytest
 
+from reachy_mini_conversation_app import obsidian_sync
 from reachy_mini_conversation_app.config import config
 from reachy_mini_conversation_app.obsidian_sync import (
     ObsidianSyncError,
@@ -405,6 +407,7 @@ def test_vault_path_defaults_to_the_instance_folder(tmp_path: Path, monkeypatch:
     monkeypatch.setattr(config, "OBSIDIAN_SYNC_PATH", None)
     monkeypatch.setattr(config, "OBSIDIAN_SYNC_VAULT", "Demo")
     monkeypatch.setattr(config, "OBSIDIAN_SYNC_ENABLED", True)
+    monkeypatch.setattr(obsidian_sync.supervisor, "linked", ("Demo", tmp_path / "obsidian" / "Demo"))
 
     assert configured_vault_path() == tmp_path / "obsidian" / "Demo"
     assert current_vault_path() is None
@@ -412,6 +415,41 @@ def test_vault_path_defaults_to_the_instance_folder(tmp_path: Path, monkeypatch:
     assert current_vault_path() == tmp_path / "obsidian" / "Demo"
     monkeypatch.setattr(config, "OBSIDIAN_SYNC_ENABLED", False)
     assert current_vault_path() is None
+
+
+def test_vault_files_are_exposed_only_after_ob_confirms_the_link(
+    fake_ob: FakeOb, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A local folder linked to another vault is never the synced vault; a folder that `ob` linked to it is."""
+    supervisor = ObsidianSyncSupervisor(restart_delays_seconds=(30.0,))
+    monkeypatch.setattr(obsidian_sync, "supervisor", supervisor)
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / ".linked").write_text(json.dumps({"vaultId": "id-2", "vaultName": "Shared"}))
+    assert current_vault_path() is None
+
+    refused = _prepare_once(supervisor)
+    assert "linked to another vault" in str(refused["last_error"])
+    assert current_vault_path() is None
+
+    (vault / ".linked").unlink()
+    assert _prepare_once(supervisor)["state"] == "syncing"
+    assert current_vault_path() == vault
+    monkeypatch.setattr(config, "OBSIDIAN_SYNC_VAULT", "Shared")
+    assert current_vault_path() is None
+
+
+def test_ob_that_cannot_start_is_a_sync_error(fake_ob: FakeOb) -> None:
+    """An `ob` that is on PATH but cannot run is reported and retried; it does not end the supervisor thread."""
+    fake_ob.executable.write_bytes(b"not an executable format\n")
+    supervisor = ObsidianSyncSupervisor(restart_delays_seconds=(30.0,))
+
+    status = _prepare_once(supervisor)
+
+    assert status["state"] == "error"
+    assert "Cannot run Obsidian Headless" in str(status["last_error"])
+    with pytest.raises(ObsidianSyncError, match="Cannot run Obsidian Headless"):
+        asyncio.run(supervisor.list_vaults())
 
 
 @pytest.mark.parametrize("vault", ["..", "../escape", "/etc"])
