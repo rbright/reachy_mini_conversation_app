@@ -9,19 +9,24 @@ from types import SimpleNamespace
 from typing import Any
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 
 import numpy as np
 import pytest
+from dotenv import dotenv_values
 from fastapi import FastAPI, HTTPException
 from numpy.typing import NDArray
 from fastapi.testclient import TestClient
 
 import reachy_mini_conversation_app.console as console_mod
+import reachy_mini_conversation_app.vault_session as vault_session_mod
+from reachy_mini_conversation_app import obsidian_sync
 from reachy_mini_conversation_app.config import HF_AVAILABLE_VOICES, OPENAI_AVAILABLE_VOICES, config
 from reachy_mini_conversation_app.console import LocalStream
 from reachy_mini_conversation_app.streaming import AdditionalOutputs
 from reachy_mini_conversation_app.wake_word import WakeWordEvent
+from reachy_mini_conversation_app.obsidian_sync import ObsidianSyncSupervisor
+from reachy_mini_conversation_app.vault_session import VaultSession
 from reachy_mini_conversation_app.startup_settings import (
     StartupSettings,
     load_startup_settings_into_runtime,
@@ -30,6 +35,25 @@ from reachy_mini_conversation_app.personality_routes import (
     RouteError,
     build_personality_ops,
 )
+from reachy_mini_conversation_app.profile_vault_access import (
+    SessionNoteTarget,
+    ProfileVaultAccess,
+    write_profile_vault_access,
+)
+
+
+@pytest.fixture(autouse=True)
+def restore_environment_and_config() -> Iterator[None]:
+    """Restore `os.environ` and `config` after each test; settings handlers write both."""
+    environ = dict(os.environ)
+    settings = dict(vars(config))
+    yield
+    for name in os.environ.keys() - environ.keys():
+        del os.environ[name]
+    os.environ.update(environ)
+    # Class-level defaults gain instance attributes on refresh; drop those too.
+    vars(config).clear()
+    vars(config).update(settings)
 
 
 def _rpc_call(app: FastAPI, method: str, params: Any = None) -> dict[str, Any]:
@@ -531,6 +555,7 @@ def test_detector_fallback_processes_prelaunch_restart(monkeypatch: pytest.Monke
     class FakeHandler:
         def __init__(self) -> None:
             self.output_queue: asyncio.Queue[Any] = asyncio.Queue()
+            self.deps = SimpleNamespace(vault_session=VaultSession())
 
         async def start_up(self) -> None:
             handler_started.set()
@@ -1040,6 +1065,47 @@ async def test_sleep_phrase_closes_gate_without_stopping_detector() -> None:
     assert stream._wake_gate_open is False
     assert stream._wake_word_detector is not None
     stream._shutdown_active_handler.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_sleep_phrase_writes_the_session_note(
+    fixture_vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sleep phrase ends the wake session and writes its vault note before the robot sleeps."""
+    monkeypatch.setattr(vault_session_mod, "current_vault_path", lambda: fixture_vault)
+    monkeypatch.setattr(config, "REACHY_MINI_CUSTOM_PROFILE", "Emma")
+    access = ProfileVaultAccess(
+        agent="emma",
+        read=("Emma/Sessions",),
+        write=("Emma/Sessions",),
+        session_log=SessionNoteTarget(folder="Emma/Sessions", type="emma-session", properties={"date": "{date}"}),
+    )
+    write_profile_vault_access("Emma", access, tmp_path)
+    handler = MagicMock()
+    handler.output_queue = asyncio.Queue()
+    handler.deps.vault_session = VaultSession()
+    handler.deps.vault_session.begin(tmp_path)
+    handler.deps.vault_session.record("user", "Tell me about owls")
+    sessions = fixture_vault / "Emma" / "Sessions"
+    notes_when_sleeping: list[list[Path]] = []
+    stream = LocalStream(
+        handler,
+        _audio_robot(),
+        instance_path=str(tmp_path),
+        wake_word_detector=MagicMock(),
+        sleep_phrases=("goodbye emma",),
+        on_sleep_phrase=lambda: notes_when_sleeping.append(sorted(sessions.glob("*.md"))),
+    )
+    stream._wake_gate_open = True
+    stream._wake_gate_event.set()
+    stream._shutdown_active_handler = AsyncMock()
+
+    assert stream._handle_transcript_command("Goodbye Emma") is True
+    await _wait_until(lambda: bool(notes_when_sleeping))
+
+    assert len(notes_when_sleeping[0]) == 1
+    assert "Tell me about owls" in notes_when_sleeping[0][0].read_text(encoding="utf-8")
+    assert handler.deps.vault_session.started_at is None
 
 
 @pytest.mark.asyncio
@@ -1612,3 +1678,104 @@ def test_backend_errors_redact_openai_credentials(monkeypatch: pytest.MonkeyPatc
     stream._set_backend_connection_state("disconnected", RuntimeError("request with do-not-expose failed"))
 
     assert stream._backend_error == "RuntimeError: request with [redacted] failed"
+
+
+_OBSIDIAN_CONFIG_NAMES = (
+    "OBSIDIAN_SYNC_ENABLED",
+    "OBSIDIAN_HEADLESS_BIN",
+    "OBSIDIAN_SYNC_VAULT",
+    "OBSIDIAN_SYNC_PATH",
+    "OBSIDIAN_SYNC_DEVICE_NAME",
+    "OBSIDIAN_SYNC_MODE",
+    "OBSIDIAN_SYNC_CONFLICT_STRATEGY",
+    "OBSIDIAN_SYNC_E2EE_PASSWORD",
+)
+
+
+@pytest.fixture
+def obsidian_settings_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[FastAPI]:
+    """Return a settings app with Obsidian settings isolated and no `ob` installed."""
+    for name in _OBSIDIAN_CONFIG_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(config, "OBSIDIAN_HEADLESS_BIN", str(tmp_path / "missing-ob"))
+    monkeypatch.setattr(config, "INSTANCE_PATH", tmp_path)
+    supervisor = ObsidianSyncSupervisor()
+    monkeypatch.setattr(obsidian_sync, "supervisor", supervisor)
+    app = FastAPI()
+    LocalStream(MagicMock(), _rpc_robot(), settings_app=app, instance_path=str(tmp_path))._init_settings_ui_if_needed()
+    yield app
+    supervisor.stop()
+
+
+def test_obsidian_configure_persists_settings_and_hides_e2ee_password(
+    obsidian_settings_app: FastAPI, tmp_path: Path
+) -> None:
+    """The E2EE password persists in `.env` but never returns through RPC; a blank input keeps it."""
+    password = "e2ee #secret $pw"
+    first = _rpc_call(
+        obsidian_settings_app,
+        "obsidian.configure",
+        {
+            "enabled": True,
+            "headless_bin": str(tmp_path / "missing-ob"),
+            "vault": "Demo",
+            "path": "",
+            "device_name": "reachy-test",
+            "mode": "pull-only",
+            "conflict_strategy": "conflict",
+            "e2ee_password": password,
+        },
+    )["result"]
+    second = _rpc_call(
+        obsidian_settings_app, "obsidian.configure", {"vault": "Demo", "mode": "bidirectional", "e2ee_password": ""}
+    )["result"]
+    status = _rpc_call(obsidian_settings_app, "obsidian.status")["result"]
+
+    assert first["has_e2ee_password"] is True
+    assert first["vault"] == "Demo"
+    assert first["path"] == str(tmp_path / "obsidian" / "Demo")
+    assert first["mode"] == "pull-only"
+    assert first["available"] is False
+    assert second["mode"] == "bidirectional"
+    assert status["has_e2ee_password"] is True
+    for payload in (first, second, status):
+        assert password not in repr(payload)
+    assert dotenv_values(tmp_path / ".env")["OBSIDIAN_SYNC_E2EE_PASSWORD"] == password
+    assert config.OBSIDIAN_SYNC_E2EE_PASSWORD == password
+
+
+def test_obsidian_configure_rejects_mirror_remote_and_missing_vault(
+    obsidian_settings_app: FastAPI, tmp_path: Path
+) -> None:
+    """Mirror-remote mode is refused, and sync cannot be enabled without a vault."""
+    mirror = _rpc_call(obsidian_settings_app, "obsidian.configure", {"vault": "Demo", "mode": "mirror-remote"})
+    no_vault = _rpc_call(obsidian_settings_app, "obsidian.configure", {"enabled": True})
+
+    assert mirror["error"]["data"]["reason"] == "obsidian_mode_refused"
+    assert no_vault["error"]["data"]["reason"] == "obsidian_vault_required"
+    assert not (tmp_path / ".env").exists()
+
+
+def test_obsidian_configure_blank_settings_restore_their_defaults(
+    obsidian_settings_app: FastAPI, tmp_path: Path
+) -> None:
+    """A blank path, `ob` executable, device name, or mode goes back to its default; a blank vault keeps the vault."""
+    custom = str(tmp_path / "custom-vault")
+    first = _rpc_call(
+        obsidian_settings_app,
+        "obsidian.configure",
+        {"vault": "Demo", "path": custom, "headless_bin": "/opt/ob", "device_name": "kitchen", "mode": "pull-only"},
+    )["result"]
+    second = _rpc_call(
+        obsidian_settings_app,
+        "obsidian.configure",
+        {"vault": "", "path": "", "headless_bin": "", "device_name": "", "mode": ""},
+    )["result"]
+
+    assert (first["path"], first["headless_bin"], first["device_name"]) == (custom, "/opt/ob", "kitchen")
+    assert second["vault"] == "Demo"
+    assert second["path"] == str(tmp_path / "obsidian" / "Demo")
+    assert (second["headless_bin"], second["device_name"], second["mode"]) == ("ob", "reachy-mini", "bidirectional")
+    persisted = dotenv_values(tmp_path / ".env")
+    for name in ("OBSIDIAN_SYNC_PATH", "OBSIDIAN_HEADLESS_BIN", "OBSIDIAN_SYNC_DEVICE_NAME", "OBSIDIAN_SYNC_MODE"):
+        assert name not in persisted

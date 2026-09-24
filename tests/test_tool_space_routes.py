@@ -131,6 +131,33 @@ def test_web_install_adds_global_inventory_without_enabling_a_profile(
     assert _rpc_call(client, "tool_spaces.list")["result"] == {"spaces": added["spaces"], "editable": True}
 
 
+def test_profile_vault_access_rpc_saves_validates_and_removes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Vault access is stored per personality, invalid entries are refused, and null removes it."""
+    instance_path, _profiles_root = _configure_profiles(tmp_path, monkeypatch)
+    client = _mount_rpc(instance_path, MagicMock(return_value=None), AsyncMock())
+    access = {
+        "agent": "emma",
+        "read": ["Emma/Sessions/", "Emma/Sessions"],
+        "write": ["Emma/Sessions"],
+        "session_log": {"folder": "Emma/Sessions", "type": "emma-session", "properties": {"date": "{date}"}},
+    }
+
+    assert _rpc_call(client, "profile_vault_access.get", {"profile": "guide"})["result"]["access"] is None
+    saved = _rpc_call(client, "profile_vault_access.save", {"profile": "guide", "access": access})["result"]
+
+    assert saved["access"]["read"] == ["Emma/Sessions"]
+    assert (instance_path / "profile_vault_access.json").is_file()
+    fetched = _rpc_call(client, "profile_vault_access.get", {"profile": "guide"})["result"]
+    assert fetched["access"]["session_log"]["type"] == "emma-session"
+
+    invalid = _rpc_call(client, "profile_vault_access.save", {"profile": "guide", "access": {"agent": "Not Valid"}})
+    assert invalid["error"]["data"]["reason"] == "invalid_vault_access"
+    assert _rpc_call(client, "profile_vault_access.get", {"profile": "guide"})["result"]["access"]["agent"] == "emma"
+
+    _rpc_call(client, "profile_vault_access.save", {"profile": "guide", "access": None})
+    assert _rpc_call(client, "profile_vault_access.get", {"profile": "guide"})["result"]["access"] is None
+
+
 def test_preinstalled_space_tools_are_available_to_every_profile(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

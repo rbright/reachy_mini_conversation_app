@@ -1,15 +1,21 @@
-/** Settings view: provider connection, voice, and runtime status. */
+/** Settings view: provider connection, voice, Obsidian Sync, vault access, and runtime status. */
 
 import {
   applyVoice,
+  configureObsidian,
   describeError,
   getCurrentVoice,
+  getObsidianStatus,
   getStatus,
+  listObsidianVaults,
   listVoices,
+  obsidianLogin,
+  obsidianLogout,
   saveBackendConfig,
   untilReady,
 } from "../api.js";
 import { BACKENDS } from "../constants.js";
+import { buildProfileVaultAccessSection } from "../components/vault-access.js";
 import { h } from "../ui.js";
 
 const HF_CONNECTION_MODES = Object.freeze({
@@ -34,6 +40,13 @@ const HF_MODE_HINTS = Object.freeze({
   [HF_CONNECTION_MODES.LOCAL]: "Connects directly to the host and port below.",
 });
 
+const OBSIDIAN_STATE_LABELS = Object.freeze({
+  stopped: "Stopped",
+  starting: "Starting…",
+  syncing: "Syncing",
+  error: "Error",
+});
+
 export async function mountSettingsView({ outlet, signal }) {
   const connectionSection = buildConnectionSection({
     onSaved: () =>
@@ -43,6 +56,8 @@ export async function mountSettingsView({ outlet, signal }) {
       ]),
   });
   const voiceSection = buildVoiceSection();
+  const obsidianSection = buildObsidianSection({ signal });
+  const vaultAccessSection = buildProfileVaultAccessSection({ signal });
   const statusSection = buildStatusSection();
 
   const view = h(
@@ -52,10 +67,12 @@ export async function mountSettingsView({ outlet, signal }) {
       "header",
       { class: "view-header" },
       h("h1", { class: "view-title" }, "Settings"),
-      h("p", { class: "view-subtitle" }, "Connection, voice, and runtime state for Reachy Mini.")
+      h("p", { class: "view-subtitle" }, "Connection, voice, Obsidian Sync, and runtime state for Reachy Mini.")
     ),
     connectionSection.element,
     voiceSection.element,
+    obsidianSection.element,
+    vaultAccessSection.element,
     statusSection.element
   );
   outlet.replaceChildren(view);
@@ -63,6 +80,8 @@ export async function mountSettingsView({ outlet, signal }) {
   await Promise.all([
     refreshStatus({ statusSection, connectionSection, signal }),
     refreshVoices({ voiceSection, signal }),
+    obsidianSection.refresh(),
+    vaultAccessSection.refresh(),
   ]);
 }
 
@@ -305,6 +324,265 @@ function buildVoiceSection() {
       select.disabled = false;
       submitButton.disabled = false;
       status.textContent = "";
+    },
+  };
+}
+
+function buildObsidianSection({ signal }) {
+  const statusList = h("dl", { class: "settings-status-grid" }, statusRow("Obsidian Sync", "Loading…"));
+
+  const emailInput = h("input", {
+    type: "email",
+    name: "obsidian_email",
+    autocomplete: "username",
+    placeholder: "Obsidian account email",
+    class: "settings-input",
+    required: "required",
+  });
+  const passwordInput = h("input", {
+    type: "password",
+    name: "obsidian_password",
+    autocomplete: "current-password",
+    placeholder: "Used once to sign in; not stored",
+    class: "settings-input",
+    required: "required",
+  });
+  const mfaInput = h("input", {
+    type: "text",
+    name: "obsidian_mfa",
+    autocomplete: "one-time-code",
+    inputmode: "numeric",
+    placeholder: "Only if your account uses 2FA",
+    class: "settings-input",
+  });
+  const loginButton = h("button", { type: "submit", class: "btn btn--primary" }, "Sign in");
+  const logoutButton = h("button", { type: "button", class: "btn btn--ghost" }, "Sign out");
+  const loginStatus = h("p", { class: "settings-status", role: "status", "aria-live": "polite" });
+  const loginForm = h(
+    "form",
+    { class: "settings-form" },
+    h("label", { class: "settings-field" }, h("span", { class: "settings-label" }, "Email"), emailInput),
+    h("label", { class: "settings-field" }, h("span", { class: "settings-label" }, "Password"), passwordInput),
+    h("label", { class: "settings-field" }, h("span", { class: "settings-label" }, "2FA code"), mfaInput),
+    h("div", { class: "settings-actions" }, loginButton, logoutButton),
+    loginStatus
+  );
+
+  const enabledInput = h("input", { type: "checkbox", name: "obsidian_enabled" });
+  const binInput = h("input", {
+    type: "text",
+    name: "obsidian_headless_bin",
+    autocomplete: "off",
+    placeholder: "ob",
+    class: "settings-input",
+  });
+  const vaultSelect = h(
+    "select",
+    { class: "settings-select", name: "obsidian_vault" },
+    h("option", { value: "" }, "Load the vault list")
+  );
+  const loadVaultsButton = h("button", { type: "button", class: "btn btn--ghost" }, "Load vaults");
+  const pathInput = h("input", {
+    type: "text",
+    name: "obsidian_path",
+    autocomplete: "off",
+    placeholder: "Default: <instance>/obsidian/<vault>",
+    class: "settings-input",
+  });
+  const deviceInput = h("input", {
+    type: "text",
+    name: "obsidian_device_name",
+    autocomplete: "off",
+    placeholder: "reachy-mini",
+    class: "settings-input",
+  });
+  const modeSelect = h("select", { class: "settings-select", name: "obsidian_mode" });
+  const strategySelect = h("select", { class: "settings-select", name: "obsidian_conflict_strategy" });
+  const e2eeInput = h("input", {
+    type: "password",
+    name: "obsidian_e2ee_password",
+    autocomplete: "new-password",
+    placeholder: "Enter the vault encryption password",
+    class: "settings-input",
+  });
+  const saveButton = h("button", { type: "submit", class: "btn btn--primary" }, "Save Obsidian Sync");
+  const configStatus = h("p", { class: "settings-status", role: "status", "aria-live": "polite" });
+  const configForm = h(
+    "form",
+    { class: "settings-form" },
+    h(
+      "label",
+      { class: "settings-tool-choice" },
+      enabledInput,
+      h("span", { class: "settings-tool-choice-copy" }, h("strong", {}, "Sync the vault on this robot"))
+    ),
+    h("label", { class: "settings-field" }, h("span", { class: "settings-label" }, "ob executable"), binInput),
+    h(
+      "div",
+      { class: "settings-field-row" },
+      h("label", { class: "settings-field" }, h("span", { class: "settings-label" }, "Remote vault"), vaultSelect),
+      h("div", { class: "settings-actions" }, loadVaultsButton)
+    ),
+    h("label", { class: "settings-field" }, h("span", { class: "settings-label" }, "Local path"), pathInput),
+    h("label", { class: "settings-field" }, h("span", { class: "settings-label" }, "Device name"), deviceInput),
+    h(
+      "div",
+      { class: "settings-field-row" },
+      h("label", { class: "settings-field" }, h("span", { class: "settings-label" }, "Sync mode"), modeSelect),
+      h(
+        "label",
+        { class: "settings-field" },
+        h("span", { class: "settings-label" }, "Conflict strategy"),
+        strategySelect
+      )
+    ),
+    h(
+      "label",
+      { class: "settings-field" },
+      h("span", { class: "settings-label" }, "End-to-end encryption password"),
+      e2eeInput
+    ),
+    h("div", { class: "settings-actions" }, saveButton),
+    configStatus
+  );
+
+  const element = h(
+    "section",
+    { class: "settings-section" },
+    h("h2", { class: "settings-section-title" }, "Obsidian Sync"),
+    h(
+      "p",
+      { class: "settings-hint" },
+      "Syncs one Obsidian vault with Obsidian Headless (ob). Install obsidian-headless on the robot first."
+    ),
+    statusList,
+    loginForm,
+    configForm
+  );
+
+  function setVaultOptions(vaults, selected) {
+    const names = vaults.map((vault) => vault.name);
+    if (selected && !names.includes(selected)) names.unshift(selected);
+    vaultSelect.replaceChildren(
+      h("option", { value: "" }, names.length ? "Choose a vault" : "Load the vault list"),
+      ...names.map((name) => h("option", { value: name }, name))
+    );
+    vaultSelect.value = selected || "";
+  }
+
+  function render(payload) {
+    statusList.replaceChildren(
+      statusRow("ob", payload.available ? "Installed" : "Not found", payload.available ? "ok" : "warn"),
+      statusRow(
+        "Account",
+        payload.signed_in === true ? "Signed in" : payload.signed_in === false ? "Not signed in" : "Unknown",
+        payload.signed_in === true ? "ok" : payload.signed_in === false ? "warn" : undefined
+      ),
+      statusRow(
+        "Sync",
+        payload.enabled ? OBSIDIAN_STATE_LABELS[payload.state] || payload.state : "Off",
+        payload.state === "syncing" ? "ok" : payload.state === "error" ? "warn" : undefined
+      ),
+      statusRow("Vault", payload.vault || "-"),
+      statusRow("Local path", payload.path || "-"),
+      statusRow("Last sync", payload.last_sync || "-"),
+      statusRow("Encryption password", payload.has_e2ee_password ? "Configured" : "Not set")
+    );
+    if (payload.last_error) statusList.appendChild(statusRow("Last error", payload.last_error, "warn"));
+
+    enabledInput.checked = Boolean(payload.enabled);
+    binInput.value = payload.headless_bin || "";
+    const knownVaults = Array.from(vaultSelect.options, (option) => option.value);
+    if (!knownVaults.includes(payload.vault || "")) setVaultOptions([], payload.vault);
+    pathInput.value = payload.custom_path || "";
+    deviceInput.value = payload.device_name || "";
+    modeSelect.replaceChildren(...(payload.modes || []).map((mode) => h("option", { value: mode }, mode)));
+    modeSelect.value = payload.mode || "";
+    strategySelect.replaceChildren(
+      ...(payload.conflict_strategies || []).map((strategy) => h("option", { value: strategy }, strategy))
+    );
+    strategySelect.value = payload.conflict_strategy || "";
+    e2eeInput.placeholder = payload.has_e2ee_password
+      ? "Configured — enter a replacement"
+      : "Enter the vault encryption password";
+  }
+
+  async function runAction(button, statusElement, busyText, action) {
+    if (button.disabled) return;
+    button.disabled = true;
+    statusElement.classList.remove("is-error");
+    statusElement.textContent = busyText;
+    try {
+      const result = await action();
+      statusElement.textContent = result?.message || "Done.";
+      if (result && "state" in result) render(result);
+    } catch (error) {
+      statusElement.textContent = `Failed: ${describeError(error)}`;
+      statusElement.classList.add("is-error");
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  loginForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    runAction(loginButton, loginStatus, "Signing in…", async () => {
+      const payload = { email: emailInput.value.trim(), password: passwordInput.value };
+      if (mfaInput.value.trim()) payload.mfa_code = mfaInput.value.trim();
+      try {
+        return await obsidianLogin(payload);
+      } finally {
+        passwordInput.value = "";
+        mfaInput.value = "";
+      }
+    });
+  });
+
+  logoutButton.addEventListener("click", () => {
+    runAction(logoutButton, loginStatus, "Signing out…", obsidianLogout);
+  });
+
+  loadVaultsButton.addEventListener("click", () => {
+    runAction(loadVaultsButton, configStatus, "Loading vaults…", async () => {
+      const result = await listObsidianVaults();
+      const vaults = Array.isArray(result?.vaults) ? result.vaults : [];
+      setVaultOptions(vaults, vaultSelect.value);
+      return { message: vaults.length ? `${vaults.length} vault(s) found.` : "No remote vaults found." };
+    });
+  });
+
+  configForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    runAction(saveButton, configStatus, "Saving…", async () => {
+      const payload = {
+        enabled: enabledInput.checked,
+        headless_bin: binInput.value.trim(),
+        vault: vaultSelect.value,
+        path: pathInput.value.trim(),
+        device_name: deviceInput.value.trim(),
+        mode: modeSelect.value,
+        conflict_strategy: strategySelect.value,
+      };
+      if (e2eeInput.value) payload.e2ee_password = e2eeInput.value;
+      try {
+        return await configureObsidian(payload);
+      } finally {
+        e2eeInput.value = "";
+      }
+    });
+  });
+
+  return {
+    element,
+    async refresh() {
+      try {
+        const payload = await untilReady(getObsidianStatus, signal);
+        if (signal.aborted) return;
+        render(payload);
+      } catch (error) {
+        if (signal.aborted) return;
+        statusList.replaceChildren(statusRow("Obsidian Sync", `Unavailable: ${describeError(error)}`, "warn"));
+      }
     },
   };
 }

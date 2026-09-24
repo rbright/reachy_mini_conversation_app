@@ -6,7 +6,10 @@ from typing import Any
 from pathlib import Path
 from collections.abc import Callable
 
+from pydantic import ValidationError
+
 from reachy_mini.apps.jsonrpc_server import JsonRpcServer
+from reachy_mini_conversation_app.vault import validation_summary
 from reachy_mini_conversation_app.config import LOCKED_PROFILE, config
 from reachy_mini_conversation_app.personality import AvailableTool, list_personalities, available_tool_catalog
 from reachy_mini_conversation_app.profile_store import (
@@ -25,6 +28,11 @@ from reachy_mini_conversation_app.profile_toolsets import (
     clear_profile_tool_override,
     write_profile_tool_override,
     read_profile_default_tool_names,
+)
+from reachy_mini_conversation_app.profile_vault_access import (
+    ProfileVaultAccess,
+    read_profile_vault_access,
+    write_profile_vault_access,
 )
 
 
@@ -214,6 +222,63 @@ def register_profile_tool_methods(
         response["message"] = f"Restored profile defaults for {profile_name}. {apply_detail}"
         return response
 
+    def _vault_access_payload(profile_name: str, known_profile_names: list[str]) -> dict[str, object]:
+        access = read_profile_vault_access(instance_path).get(profile_name)
+        active_profile = canonical_profile_name(config.REACHY_MINI_CUSTOM_PROFILE)
+        return {
+            "profile": profile_name,
+            "is_active": profile_name == active_profile,
+            "editable": LOCKED_PROFILE is None,
+            "profiles": [
+                {"id": known_profile, "active": known_profile == active_profile}
+                for known_profile in known_profile_names
+            ],
+            "access": access.model_dump(mode="json", exclude_none=True) if access is not None else None,
+        }
+
+    async def _get_vault_access(params: dict[str, Any]) -> dict[str, object]:
+        requested_profile = _profile_param(params)
+        try:
+            known_profile_names = await asyncio.to_thread(_known_profile_names)
+            profile_name = _validated_profile(
+                requested_profile or config.REACHY_MINI_CUSTOM_PROFILE,
+                known_profile_names,
+            )
+            return await asyncio.to_thread(_vault_access_payload, profile_name, known_profile_names)
+        except ValueError as exc:
+            raise_tool_settings_error("unknown_profile", str(exc))
+        except RuntimeError as exc:
+            logger.exception("Failed to read vault access for %r", requested_profile)
+            raise_tool_settings_error("vault_access_unavailable", str(exc))
+
+    async def _save_vault_access(params: dict[str, Any]) -> dict[str, object]:
+        if LOCKED_PROFILE is not None:
+            raise_tool_settings_error("profile_locked", "Personality vault access editing is locked.")
+        requested_profile = _profile_param(params, required=True)
+        raw_access = params.get("access")
+        try:
+            access = None if raw_access is None else ProfileVaultAccess.model_validate(raw_access)
+        except ValidationError as exc:
+            raise_tool_settings_error("invalid_vault_access", validation_summary(exc))
+        try:
+            known_profile_names = await asyncio.to_thread(_known_profile_names)
+            profile_name = _validated_profile(requested_profile, known_profile_names)
+            await asyncio.to_thread(write_profile_vault_access, profile_name, access, instance_path)
+            response = await asyncio.to_thread(_vault_access_payload, profile_name, known_profile_names)
+        except ValueError as exc:
+            raise_tool_settings_error("unknown_profile", str(exc))
+        except (OSError, RuntimeError) as exc:
+            logger.exception("Failed to save vault access for %r", requested_profile)
+            raise_tool_settings_error("vault_access_save_failed", str(exc))
+        response["message"] = (
+            f"Saved vault access for {profile_name}. It applies from the next conversation."
+            if access is not None
+            else f"Removed vault access for {profile_name}."
+        )
+        return response
+
     rpc.register("profile_tools.get", _get_profile_tools)
     rpc.register("profile_tools.save", _save_profile_tools)
     rpc.register("profile_tools.reset", _reset_profile_tools)
+    rpc.register("profile_vault_access.get", _get_vault_access)
+    rpc.register("profile_vault_access.save", _save_vault_access)

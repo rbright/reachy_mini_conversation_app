@@ -1,8 +1,14 @@
 """Tests for app-level runtime behavior."""
 
+import os
+import sys
+import textwrap
 import threading
+import subprocess
 from types import SimpleNamespace
 from unittest.mock import MagicMock
+
+import pytest
 
 import reachy_mini_conversation_app.main as main_mod
 
@@ -64,3 +70,36 @@ def test_standalone_ui_uses_stable_writable_instance_path(tmp_path, monkeypatch)
 
     assert paths == [tmp_path / "reachy_mini_conversation_app"] * 2
     assert previous_contents == [None, "BACKEND_PROVIDER=openai\n"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX signals")
+@pytest.mark.parametrize("inherited_sigint", ["default_int_handler", "SIG_IGN"])
+def test_sigterm_takes_the_orderly_sigint_shutdown_path(inherited_sigint: str) -> None:
+    """SIGTERM ends a running event loop like SIGINT, also when SIGINT is ignored, so `finally` blocks run."""
+    script = textwrap.dedent(
+        f"""
+        import os, signal, asyncio, threading
+        from reachy_mini_conversation_app.main import _handle_sigterm_as_sigint
+
+        # A background job from a non-interactive shell inherits SIGINT as ignored.
+        signal.signal(signal.SIGINT, signal.{inherited_sigint})
+
+        async def runner():
+            # Sent while the loop waits, like a service manager stop.
+            threading.Timer(0.2, os.kill, (os.getpid(), signal.SIGTERM)).start()
+            try:
+                await asyncio.sleep(5)
+            finally:
+                await asyncio.to_thread(print, "session flushed", flush=True)
+
+        _handle_sigterm_as_sigint()
+        try:
+            asyncio.run(runner())
+        except KeyboardInterrupt:
+            print("interrupted", flush=True)
+        """
+    )
+
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=30)
+
+    assert result.stdout.split() == ["session", "flushed", "interrupted"], result.stderr
