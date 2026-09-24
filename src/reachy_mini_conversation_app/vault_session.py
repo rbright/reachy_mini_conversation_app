@@ -3,9 +3,12 @@
 import re
 import uuid
 import logging
+import threading
 from pathlib import Path
 from datetime import date, datetime, timedelta
+from contextlib import contextmanager
 from dataclasses import field, dataclass
+from collections.abc import Iterator
 
 from reachy_mini_conversation_app import obsidian_sync
 from reachy_mini_conversation_app.vault import (
@@ -224,6 +227,22 @@ class VaultSession:
     transcript_chars: int = 0
     transcript_truncated: bool = False
     user_spoke: bool = False
+    # Clear during a vault settings change, so that no session begins before the change is done.
+    _begin_allowed: threading.Event = field(default_factory=threading.Event, init=False, repr=False, compare=False)
+    _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        """Allow `begin()`."""
+        self._begin_allowed.set()
+
+    @contextmanager
+    def vault_change(self) -> Iterator[None]:
+        """Hold back `begin()` until the vault settings change is done."""
+        self._begin_allowed.clear()
+        try:
+            yield
+        finally:
+            self._begin_allowed.set()
 
     def begin(self, instance_path: str | Path | None, now: datetime | None = None) -> None:
         """Start the session and load its vault context, unless it already runs for the active profile.
@@ -232,9 +251,16 @@ class VaultSession:
         vault tools changed, so that the context describes the tools the model has, and when it has no context but
         the vault is now available.
         """
-        # At app start and after a vault change, `ob` confirms the vault link a few seconds after the connection.
-        # A vault change also ends the running session meanwhile, so that this start begins a new one.
-        obsidian_sync.supervisor.wait_for_link_check(VAULT_LINK_WAIT_SECONDS)
+        while True:
+            self._begin_allowed.wait()
+            # At app start and after a vault change, `ob` confirms the vault link a few seconds after the connection.
+            obsidian_sync.supervisor.wait_for_link_check(VAULT_LINK_WAIT_SECONDS)
+            with self._lock:
+                if self._begin_allowed.is_set():
+                    self._begin(instance_path, now)
+                    return
+
+    def _begin(self, instance_path: str | Path | None, now: datetime | None) -> None:
         profile = canonical_profile_name(config.REACHY_MINI_CUSTOM_PROFILE)
         if self.started_at is not None:
             if self.profile == profile:
@@ -288,23 +314,24 @@ class VaultSession:
 
     def end(self, instance_path: str | Path | None, now: datetime | None = None) -> None:
         """Write the session log and the weekly memory of each finished week that has none; then close the session."""
-        if self.started_at is None:
-            return
-        try:
-            if self.user_spoke:
-                active = active_vault(instance_path, self.profile)
-                ended_at = now or datetime.now().astimezone()
-                self._write_session_log(active)
-                self._write_weekly_memories(active, ended_at)
-        except (VaultError, OSError) as exc:
-            logger.warning("Vault session note not written: %s", exc)
-        finally:
-            self.started_at = None
-            self.session_id = ""
-            self.profile = ""
-            self.context = ""
-            self.vault_tools = False
-            self._clear_transcript()
+        with self._lock:
+            if self.started_at is None:
+                return
+            try:
+                if self.user_spoke:
+                    active = active_vault(instance_path, self.profile)
+                    ended_at = now or datetime.now().astimezone()
+                    self._write_session_log(active)
+                    self._write_weekly_memories(active, ended_at)
+            except (VaultError, OSError) as exc:
+                logger.warning("Vault session note not written: %s", exc)
+            finally:
+                self.started_at = None
+                self.session_id = ""
+                self.profile = ""
+                self.context = ""
+                self.vault_tools = False
+                self._clear_transcript()
 
     def _target_path(self, active: ActiveVault, target: SessionNoteTarget, values: dict[str, str], name: str) -> str:
         rule = active.vault.schema.types.get(target.type)

@@ -261,24 +261,6 @@ def test_restart_after_final_shutdown_starts_nothing(fake_ob: FakeOb) -> None:
     assert fake_ob.commands().count("sync") == 1
 
 
-def test_only_the_next_start_ends_an_expected_link_check(fake_ob: FakeOb) -> None:
-    """After a vault change is expected, the old sync loop's link checks do not end a session start's wait."""
-    fake_ob.set_sync_behavior("fail")
-    supervisor = ObsidianSyncSupervisor(restart_delays_seconds=(0.05,))
-    supervisor.start()
-    try:
-        _wait_until(lambda: fake_ob.commands().count("sync") >= 1)
-        supervisor.expect_link_check()
-        checks = fake_ob.commands().count("sync-status")
-        _wait_until(lambda: fake_ob.commands().count("sync-status") >= checks + 2)
-        assert supervisor.wait_for_link_check(0) is False
-
-        supervisor.restart()
-        assert supervisor.wait_for_link_check(10.0) is True
-    finally:
-        supervisor.stop()
-
-
 def test_supervisor_refuses_a_path_linked_to_another_vault(fake_ob: FakeOb, tmp_path: Path) -> None:
     """A local path already linked to another vault is reported, not set up again."""
     (tmp_path / "vault").mkdir()

@@ -9,6 +9,7 @@ import re
 import time
 import asyncio
 import logging
+import contextlib
 from math import gcd
 from typing import Any, List, Optional
 from pathlib import Path
@@ -933,9 +934,7 @@ class LocalStream:
                 elif name in params:
                     cleared.append(env_name)
 
-            # A running session holds the context of the vault that it started with. The backend stops first, so
-            # that no turn is lost; the session ends while the old vault still syncs, so that its log reaches that
-            # vault; the rebuild comes last, so that the next session begins after the change and loads the new vault.
+            # A session never spans a vault change: it ends under the old settings, and the next one begins after it.
             vault_changed = (
                 ("enabled" in params and (params["enabled"] is True) != config.OBSIDIAN_SYNC_ENABLED)
                 or (bool(texts["vault"]) and texts["vault"] != config.OBSIDIAN_SYNC_VAULT)
@@ -944,22 +943,22 @@ class LocalStream:
                     and Path(texts["path"]).expanduser() != Path(config.OBSIDIAN_SYNC_PATH or "").expanduser()
                 )
             )
+            reconnect = vault_changed and self._can_rebuild_handler()
             vault_session = self.handler.deps.vault_session
-            reconnect = vault_changed and vault_session.started_at is not None and self._can_rebuild_handler()
-            if reconnect:
-                obsidian_sync.supervisor.expect_link_check()
-                await self.request_backend_restart("obsidian_vault_changed", rebuild=False)
-            if vault_changed:
-                await asyncio.to_thread(vault_session.end, self._instance_path)
+            with vault_session.vault_change() if vault_changed else contextlib.nullcontext():
+                if reconnect:
+                    await self.request_backend_restart("obsidian_vault_changed", rebuild=False)
+                if vault_changed:
+                    await asyncio.to_thread(vault_session.end, self._instance_path)
 
-            if cleared:
-                # Removed from the instance `.env` first, so that the reload in `_persist_env_values` cannot restore them.
-                self._remove_persisted_env_values(tuple(cleared))
-                for env_name in cleared:
-                    os.environ.pop(env_name, None)
-                refresh_runtime_config_from_env()
-            self._persist_env_values(updates)
-            await asyncio.to_thread(obsidian_sync.supervisor.restart)
+                if cleared:
+                    # Removed from the instance `.env` first, so that the reload in `_persist_env_values` cannot restore them.
+                    self._remove_persisted_env_values(tuple(cleared))
+                    for env_name in cleared:
+                        os.environ.pop(env_name, None)
+                    refresh_runtime_config_from_env()
+                self._persist_env_values(updates)
+                await asyncio.to_thread(obsidian_sync.supervisor.restart)
             if reconnect:
                 await self.request_backend_restart("obsidian_vault_changed")
             return {"ok": True, "message": "Obsidian Sync settings saved.", **obsidian_sync.supervisor.status()}

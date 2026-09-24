@@ -9,7 +9,6 @@ import reachy_mini_conversation_app.vault_session as vault_session_mod
 from reachy_mini_conversation_app import obsidian_sync
 from reachy_mini_conversation_app.vault import parse_note
 from reachy_mini_conversation_app.config import config
-from reachy_mini_conversation_app.obsidian_sync import ObsidianSyncSupervisor
 from reachy_mini_conversation_app.vault_session import TRANSCRIPT_MAX_CHARS, SESSION_CONTEXT_MAX_CHARS, VaultSession
 from reachy_mini_conversation_app.profile_toolsets import write_profile_tool_override
 from reachy_mini_conversation_app.profile_vault_access import ProfileVaultAccess, write_profile_vault_access
@@ -305,22 +304,35 @@ def test_session_start_waits_for_the_vault_link_check(
     emma_vault: Path, fixture_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A session that starts while `ob` still checks the vault link gets the vault context when the check ends."""
-    supervisor = ObsidianSyncSupervisor()
+
+    class LinkCheck:
+        linked: tuple[str, Path] | None = None
+
+        def wait_for_link_check(self, timeout: float) -> None:
+            self.linked = ("Fixture", fixture_vault)
+
+    supervisor = LinkCheck()
     monkeypatch.setattr(obsidian_sync, "supervisor", supervisor)
     monkeypatch.setattr(vault_session_mod, "current_vault_path", lambda: fixture_vault if supervisor.linked else None)
-    supervisor.expect_link_check()
 
-    def confirm_link() -> None:
-        supervisor.linked = ("Fixture", fixture_vault)
-        supervisor.stop()
-
-    timer = threading.Timer(0.2, confirm_link)
-    timer.start()
     session = VaultSession()
     session.begin(emma_vault)
-    timer.join()
 
     assert "Ask about the dinosaur book." in session.context
+
+
+def test_session_start_waits_for_a_vault_change_to_finish(emma_vault: Path) -> None:
+    """A connection that begins during a vault change starts its session only after the change is done."""
+    session = VaultSession()
+    connection = threading.Thread(target=session.begin, args=(emma_vault,))
+    with session.vault_change():
+        connection.start()
+        connection.join(timeout=0.2)
+        assert connection.is_alive()
+        assert session.started_at is None
+
+    connection.join(timeout=5.0)
+    assert session.started_at is not None
 
 
 def test_reconnect_loads_the_context_that_was_missing_at_session_start(

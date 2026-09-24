@@ -129,6 +129,26 @@ async def test_vault_context_is_appended_once_per_wake_session(monkeypatch: pyte
 
 
 @pytest.mark.asyncio
+async def test_shutdown_while_the_session_begins_does_not_start_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A handler that shuts down while its vault session waits to begin closes the connection instead of running it."""
+    monkeypatch.setattr(realtime_mod, "get_tool_specs", lambda: [])
+    handler = _handler()
+    handler.client = _FakeRealtimeClient({}, {})  # type: ignore[assignment]
+    tools_started = MagicMock()
+    monkeypatch.setattr(type(handler.tool_manager), "start_up", tools_started)
+    monkeypatch.setattr(type(handler.tool_manager), "shutdown", AsyncMock())
+
+    with handler.deps.vault_session.vault_change():
+        session_task = asyncio.create_task(handler._run_realtime_session())
+        await asyncio.sleep(0.1)
+        await handler.shutdown()
+    await asyncio.wait_for(session_task, 5.0)
+
+    tools_started.assert_not_called()
+    assert handler.connection is None
+
+
+@pytest.mark.asyncio
 async def test_openai_camera_tool_result_attaches_image(monkeypatch: pytest.MonkeyPatch) -> None:
     """OpenAI function-call results attach camera images without echoing base64 in tool output."""
     handler = _handler()
