@@ -122,6 +122,7 @@ Copy `.env.example` to `.env` to configure a provider outside the web UI.
 | `OBSIDIAN_SYNC_MODE` | `bidirectional` (default) or `pull-only`. `mirror-remote` is refused because it reverts local writes. |
 | `OBSIDIAN_SYNC_CONFLICT_STRATEGY` | `merge` (default) or `conflict`. |
 | `OBSIDIAN_SYNC_E2EE_PASSWORD` | End-to-end encryption password of the remote vault. The Settings UI can save or replace it and never returns it to the browser. |
+| `REACHY_MINI_SETTINGS_PIN_HASH` | scrypt hash of the settings PIN. The Settings UI sets it. Remove the line and restart the app to reset the PIN. |
 
 With wake gating enabled, the microphone runs only the local wake-word model until it detects the wake phrase. Reachy wakes and starts a fresh realtime session. A configured sleep phrase closes that session, moves Reachy to its sleep pose, and leaves the local detector running for the next wake phrase. The optional openWakeWord runtime is installed on Linux ARM64 with Python 3.11 or 3.12, which covers the Reachy Mini deployment. On other platforms or when that runtime cannot load, the app logs the error and continues in always-on mode.
 
@@ -177,6 +178,14 @@ HF_REALTIME_WS_URL=ws://127.0.0.1:8765/v1/realtime
 ```
 
 In the web UI's Settings view, select Hugging Face or OpenAI Realtime. Hugging Face keeps its hosted/local controls. OpenAI exposes its API key, validated model catalog, and native voice catalog. Voice choices update for the selected provider.
+
+### Settings PIN
+
+The web UI talks to the app over the `/rpc` WebSocket on port 7860. The app refuses a WebSocket upgrade whose `Origin` header is not the app's own origin, so a page on another site cannot use `/rpc`.
+
+Settings that change secrets, the Obsidian account, vault access, the backend, or tools need the settings PIN. The first time you change one of them, the UI asks you to set a PIN of 6 or more characters. After that, it asks for the PIN once per page load. The app stores only a scrypt hash in the instance `.env`. After 5 wrong PINs, the app refuses all PINs for 60 seconds. You cannot change the PIN in the UI: remove `REACHY_MINI_SETTINGS_PIN_HASH` from the instance `.env`, restart the app, and set a new PIN.
+
+Until you set a PIN, the app refuses these settings. The first client to set the PIN owns it, so set it soon after you install or update the app.
 
 ### Obsidian Sync
 

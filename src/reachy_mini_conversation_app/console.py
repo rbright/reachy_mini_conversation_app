@@ -20,7 +20,6 @@ from scipy.signal import firwin, lfilter
 
 from reachy_mini import ReachyMini
 from reachy_mini.io.jsonrpc import JsonRpcError
-from reachy_mini.apps.jsonrpc_server import JsonRpcServer
 from reachy_mini.media.media_manager import MediaBackend
 from reachy_mini_conversation_app import obsidian_sync
 from reachy_mini_conversation_app.config import (
@@ -69,6 +68,7 @@ from reachy_mini_conversation_app.wake_word import (
     matches_sleep_phrase,
 )
 from reachy_mini_conversation_app.obsidian_sync import ObsidianSyncError
+from reachy_mini_conversation_app.settings_auth import SettingsPinGuard, SettingsRpcServer
 from reachy_mini_conversation_app.startup_settings import read_startup_settings, write_startup_settings
 from reachy_mini_conversation_app.tools.core_tools import initialize_tools
 from reachy_mini_conversation_app.tool_space_routes import register_tool_space_methods
@@ -236,7 +236,7 @@ class LocalStream:
         # JSON-RPC control surface (mounted at /rpc in _init_settings_ui_if_needed).
         # Notifications (conversation.turn/phase/transcript/activity) are pushed
         # here from activity + transcripts. Survives handler rebuilds (mounted once).
-        self._rpc: Optional[JsonRpcServer] = None
+        self._rpc: Optional[SettingsRpcServer] = None
         self._last_turn_state: Optional[str] = None
         # Per-role throttle timestamps for conversation.level (orb audio meter).
         self._last_level_emit: dict[str, float] = {}
@@ -766,7 +766,8 @@ class LocalStream:
         # The single wire format both the local browser UI and remote WebRTC
         # clients use (the daemon relays it over the DataChannel). Notifications
         # (conversation.turn/phase/transcript/activity) are pushed from activity.
-        rpc = JsonRpcServer()
+        # Privileged settings methods need the settings PIN (see settings_auth).
+        rpc = SettingsRpcServer(SettingsPinGuard(self._persist_env_values))
 
         # SDK isn't marked py.typed, so mypy sees rpc.method as untyped; safe here.
         @rpc.method("conversation.status")  # type: ignore[untyped-decorator]
