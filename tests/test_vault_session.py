@@ -199,6 +199,46 @@ def test_session_context_lists_writable_types_in_the_vault_root(emma_vault: Path
     assert "Note types you may write: `inbox`" in session.context
 
 
+def test_session_context_lists_record_state_and_types_under_a_narrower_grant(emma_vault: Path) -> None:
+    """A record type shows its implicit `state` key; a write grant inside a type folder makes the type writable."""
+    access = {**ACCESS, "write": ["Emma/Tasks", "Emma/Research/Drafts"]}
+    write_profile_vault_access("Emma", ProfileVaultAccess.model_validate(access), emma_vault)
+    session = VaultSession()
+
+    session.begin(emma_vault)
+
+    assert "`research` (artifact; required: none), `task` (record; required: state)" in session.context
+
+
+def test_tool_change_in_a_running_session_reloads_its_context(emma_vault: Path) -> None:
+    """A reconnect after the profile's vault tools change reloads the context and keeps the transcript."""
+    session = VaultSession()
+    session.begin(emma_vault)
+    session.record("user", "Hello")
+    write_profile_tool_override("Emma", ["camera"], emma_vault)
+
+    session.begin(emma_vault)
+
+    assert "You have no vault tools" in session.context
+    assert session.turns == [("user", "Hello")]
+
+
+def test_session_log_in_the_vault_root(emma_vault: Path, fixture_vault: Path) -> None:
+    """A session log target folder of "." writes the log at the vault root."""
+    schema = fixture_vault / "System/Schema.md"
+    text = schema.read_text(encoding="utf-8").replace("types:\n", "types:\n  root-log: {class: log, folders: [.]}\n")
+    schema.write_text(text.replace("write: [Emma/Sessions,", 'write: [".", Emma/Sessions,'), encoding="utf-8")
+    access = {**ACCESS, "write": ["."], "session_log": {"folder": ".", "type": "root-log"}}
+    write_profile_vault_access("Emma", ProfileVaultAccess.model_validate(access), emma_vault)
+    session = VaultSession()
+    session.begin(emma_vault, now=datetime(2026, 9, 23, 14, 5))
+    session.record("user", "Hi")
+
+    session.end(emma_vault, now=datetime(2026, 9, 23, 14, 20))
+
+    assert len(list(fixture_vault.glob("2026-09-23-1405-*.md"))) == 1
+
+
 def test_session_end_writes_one_log_and_skips_empty_sessions(emma_vault: Path, fixture_vault: Path) -> None:
     """A session with a user turn writes one contract log; a session without one writes nothing."""
     empty = VaultSession()

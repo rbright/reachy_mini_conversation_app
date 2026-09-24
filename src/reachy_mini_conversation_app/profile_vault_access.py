@@ -7,7 +7,7 @@ import threading
 from typing import ClassVar
 from pathlib import Path
 
-from pydantic import Field, BaseModel, ConfigDict, ValidationError, field_validator
+from pydantic import Field, BaseModel, ConfigDict, ValidationError, field_validator, field_serializer
 
 from reachy_mini_conversation_app.vault import AGENT_ID, PLACEHOLDER, NAME_PLACEHOLDERS, Folders, normalize_folder
 from reachy_mini_conversation_app.profile_store import canonical_profile_name
@@ -39,6 +39,11 @@ class SessionNoteTarget(_AccessModel):
     @classmethod
     def _normalize_folder(cls, folder: str) -> str:
         return normalize_folder(folder)
+
+    @field_serializer("folder")
+    def _root_as_dot(self, folder: str) -> str:
+        # Stored and sent as "." for the root, like `Folders`, so that a saved root target reads back.
+        return folder or "."
 
     @field_validator("properties")
     @classmethod

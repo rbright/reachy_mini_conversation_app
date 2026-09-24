@@ -9,6 +9,7 @@ from dataclasses import field, dataclass
 
 from reachy_mini_conversation_app.vault import (
     Vault,
+    TypeRule,
     VaultError,
     note_path,
     read_note,
@@ -150,15 +151,26 @@ def _context_notes(active: ActiveVault) -> dict[str, str]:
     return notes
 
 
+def _required_keys(rule: TypeRule) -> str:
+    """Return the keys a `vault_write` call must set for a type: `state` for a record, then the schema's own."""
+    keys = (["state"] if rule.note_class == "record" else []) + list(rule.required)
+    return ", ".join(dict.fromkeys(keys)) or "none"
+
+
+def _folders_overlap(grants: tuple[str, ...], folder: str) -> bool:
+    """Return whether `folder` is in a grant or a grant is in `folder`; writes are possible in the overlap."""
+    return covers_folder(grants, folder) or any(covers_folder((folder,), granted) for granted in grants)
+
+
 def build_session_context(active: ActiveVault, vault_tools: bool) -> str:
     """Return the capped vault rules, then the `session_context` notes as delimited untrusted data."""
     access = active.access
     schema = active.vault.schema
     if vault_tools:
         writable = [
-            f"`{name}` ({rule.note_class}; required: {', '.join(rule.required) or 'none'})"
+            f"`{name}` ({rule.note_class}; required: {_required_keys(rule)})"
             for name, rule in schema.types.items()
-            if rule.note_class != "reference" and any(covers_folder(access.write, folder) for folder in rule.folders)
+            if rule.note_class != "reference" and any(_folders_overlap(access.write, f) for f in rule.folders)
         ]
         summary = [
             f"Vault `{schema.vault}`. You write as `agent/{access.agent}` with the vault tools.",
@@ -205,13 +217,20 @@ class VaultSession:
     profile: str = ""
     started_at: datetime | None = None
     context: str = ""
+    vault_tools: bool = False
     turns: list[tuple[str, str]] = field(default_factory=list)
 
     def begin(self, instance_path: str | Path | None, now: datetime | None = None) -> None:
-        """Start the session and load its vault context, unless it already runs for the active profile."""
+        """Start the session and load its vault context, unless it already runs for the active profile.
+
+        A running session of the same profile keeps its transcript; it reloads its context when the profile's
+        vault tools changed, so that the context describes the tools the model has.
+        """
         profile = canonical_profile_name(config.REACHY_MINI_CUSTOM_PROFILE)
         if self.started_at is not None:
             if self.profile == profile:
+                if _has_vault_tools(profile, instance_path) != self.vault_tools:
+                    self._load_context(instance_path)
                 return
             # A profile change ends the old profile's session, so its turns stay in its own vault notes.
             self.end(instance_path, now)
@@ -219,10 +238,14 @@ class VaultSession:
         self.session_id = f"{self.started_at:%Y%m%dT%H%M%S}-{uuid.uuid4().hex[:6]}"
         self.profile = profile
         self.turns = []
+        self._load_context(instance_path)
+
+    def _load_context(self, instance_path: str | Path | None) -> None:
         self.context = ""
+        self.vault_tools = _has_vault_tools(self.profile, instance_path)
         try:
-            active = active_vault(instance_path, profile)
-            self.context = build_session_context(active, _has_vault_tools(profile, instance_path))
+            active = active_vault(instance_path, self.profile)
+            self.context = build_session_context(active, self.vault_tools)
         except VaultError as exc:
             logger.info("No vault context for this session: %s", exc)
         except OSError as exc:
@@ -255,13 +278,15 @@ class VaultSession:
             self.session_id = ""
             self.profile = ""
             self.context = ""
+            self.vault_tools = False
             self.turns = []
 
     def _target_path(self, active: ActiveVault, target: SessionNoteTarget, values: dict[str, str], name: str) -> str:
         rule = active.vault.schema.types.get(target.type)
         if rule is None:
             raise VaultError(f"note type `{target.type}` is not in the vault schema")
-        return f"{target.folder}/{fill_placeholders(rule.name or name, values)}.md"
+        name = fill_placeholders(rule.name or name, values)
+        return f"{target.folder}/{name}.md" if target.folder else f"{name}.md"
 
     def _write_target(
         self,
