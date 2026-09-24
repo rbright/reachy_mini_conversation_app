@@ -19,6 +19,7 @@ from reachy_mini_conversation_app.profile_store import (
     ProfileFormatError,
     write_profile,
     list_profile_names,
+    canonical_profile_name,
     read_profile_from_directory,
     read_packaged_default_profile,
 )
@@ -29,6 +30,7 @@ from reachy_mini_conversation_app.profile_toolsets import (
     clear_profile_tool_override,
     profile_toolsets_transaction,
 )
+from reachy_mini_conversation_app.profile_vault_access import read_profile_vault_access, write_profile_vault_access
 from reachy_mini_conversation_app.tools.tool_constants import SystemTool
 
 
@@ -121,6 +123,12 @@ def delete_personality(name: str) -> bool:
         clear_profile_tool_override(name, config.INSTANCE_PATH)
     except (OSError, RuntimeError) as exc:
         logger.warning("Deleted personality %r but could not remove its tool override: %s", name, exc)
+    # A new personality with the same name must not inherit this one's vault access.
+    try:
+        if canonical_profile_name(name) in read_profile_vault_access(config.INSTANCE_PATH):
+            write_profile_vault_access(name, None, config.INSTANCE_PATH)
+    except (OSError, RuntimeError) as exc:
+        logger.warning("Deleted personality %r but could not remove its vault access: %s", name, exc)
     return True
 
 
