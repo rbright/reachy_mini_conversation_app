@@ -301,17 +301,19 @@ class VaultSession:
     def record(self, role: str, text: str) -> None:
         """Add one final transcript turn on one line, until the transcript reaches its cap."""
         text = " ".join(text.split())
-        if self.started_at is None or not text:
-            return
-        self.user_spoke = self.user_spoke or role == "user"
-        if self.transcript_truncated:
-            return
-        # A session can run for days, so turns past the cap are dropped here rather than kept until the log.
-        if self.transcript_chars + len(text) > TRANSCRIPT_MAX_CHARS:
-            self.transcript_truncated = True
-            return
-        self.transcript_chars += len(text)
-        self.turns.append((role, text))
+        # The session end runs in another thread; a turn goes either into its log or into no session.
+        with self._lock:
+            if self.started_at is None or not text:
+                return
+            self.user_spoke = self.user_spoke or role == "user"
+            if self.transcript_truncated:
+                return
+            # A session can run for days, so turns past the cap are dropped here rather than kept until the log.
+            if self.transcript_chars + len(text) > TRANSCRIPT_MAX_CHARS:
+                self.transcript_truncated = True
+                return
+            self.transcript_chars += len(text)
+            self.turns.append((role, text))
 
     def end(self, instance_path: str | Path | None, now: datetime | None = None) -> None:
         """Write the session log and the weekly memory of each finished week that has none; then close the session."""
