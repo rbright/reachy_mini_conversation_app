@@ -85,7 +85,7 @@ These are the cleanups we make in review over and over. Write code that wouldn't
 - **PEP 8 and the Google Python Style Guide are the baseline.** Ruff enforces what it can (line length 119, double quotes, isort `length-sort`). Don't fight the formatter or dodge a lint rule with clever constructs.
 - **mypy runs `strict`** (`python_version = 3.12`), with no new ignores.
 - **Modern typing for new code:** built-in generics (`list[str]`, `dict[str, int]`) and `X | None`, not `typing.List` or `Optional`. Some old modules still use the old style. Match the modern one.
-- **No PEP 695 syntax** (`type Alias = ...`, `def f[T](...)`) and no `from __future__ import annotations`. The package targets `>=3.10`, where PEP 695 is a hard syntax error.
+- **No PEP 695 syntax** (`type Alias = ...`, `def f[T](...)`) and no `from __future__ import annotations`. The package targets `>=3.11`, where PEP 695 is a hard syntax error.
 - **Cross-platform** (Linux, macOS, Windows): no hardcoded paths, no shell-specific commands, no OS-only APIs without a documented fallback.
 - **Flag any new dependency before adding it.**
 
@@ -99,7 +99,7 @@ src/reachy_mini_conversation_app/
   config.py               # configuration + env loading
   personality.py          # personality/profile loading
   tools/                  # LLM-callable tools (one file per tool)
-  audio/, memory/, sounds/, static/
+  audio/, resources/, static/
 profiles/                 # bundled personalities (one dir per profile)
 tests/                    # pytest suite, mirrors the src layout
 ```
