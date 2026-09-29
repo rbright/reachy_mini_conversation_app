@@ -16,7 +16,9 @@ import pytest
 from dotenv import dotenv_values
 from fastapi import FastAPI, HTTPException
 from numpy.typing import NDArray
+from websockets.frames import Close
 from fastapi.testclient import TestClient
+from websockets.exceptions import ConnectionClosedError
 
 import reachy_mini_conversation_app.console as console_mod
 import reachy_mini_conversation_app.vault_session as vault_session_mod
@@ -1174,6 +1176,65 @@ async def test_wake_waits_for_sleep_transition() -> None:
 
     assert transitions == ["sleep", "wake"]
     assert stream._wake_gate_open is True
+
+
+@pytest.mark.asyncio
+async def test_exhausted_quota_sleeps_until_each_wake_word(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An exhausted realtime quota sleeps the robot on each attempt instead of retrying and keeps the error visible."""
+    monkeypatch.setattr(config, "HF_REALTIME_CONNECTION_MODE", "local")
+    monkeypatch.setattr(config, "HF_REALTIME_SESSION_URL", None)
+    monkeypatch.setattr(config, "HF_REALTIME_WS_URL", "ws://127.0.0.1:8765/v1/realtime")
+    quota_error = ConnectionClosedError(Close(1013, "insufficient_quota.credit_balance_exhausted: add credits"), None)
+    handlers: list[MagicMock] = []
+
+    def handler_factory(_voice: str | None) -> MagicMock:
+        handler = MagicMock()
+        handler.connection = None
+        handler.output_queue = asyncio.Queue()
+        handler.start_up = AsyncMock(side_effect=quota_error)
+        handler.shutdown = AsyncMock()
+        handlers.append(handler)
+        return handler
+
+    app = FastAPI()
+    on_sleep_phrase = MagicMock()
+    stream = LocalStream(
+        handler_factory(None),
+        _audio_robot(),
+        settings_app=app,
+        instance_path=str(tmp_path),
+        handler_factory=handler_factory,
+        wake_word_detector=MagicMock(),
+        on_sleep_phrase=on_sleep_phrase,
+    )
+    stream._init_settings_ui_if_needed()
+    stream._wake_gate_open = True
+    stream._wake_gate_event.set()
+
+    startup_task = asyncio.create_task(stream._run_handler_startup_loop())
+    try:
+        await _wait_until(lambda: on_sleep_phrase.call_count == 1 and stream._backend_connection_state == "sleeping")
+
+        assert stream._wake_gate_open is False
+        handlers[0].start_up.assert_awaited_once_with()
+
+        await stream._handle_wake_event(WakeWordEvent(model="hey_emma", score=0.9))
+        await _wait_until(lambda: on_sleep_phrase.call_count == 2 and stream._backend_connection_state == "sleeping")
+
+        assert stream._wake_gate_open is False
+        assert len(handlers) == 2
+        handlers[1].start_up.assert_awaited_once_with()
+        # The RPC server binds its notification loop to the test client, so query status last.
+        data = _rpc_call(app, "conversation.status")["result"]
+        assert data["backend_connection_state"] == "sleeping"
+        assert "insufficient_quota" in data["backend_error"]
+    finally:
+        stream._stop_event.set()
+        startup_task.cancel()
+        try:
+            await startup_task
+        except asyncio.CancelledError:
+            pass
 
 
 @pytest.mark.asyncio

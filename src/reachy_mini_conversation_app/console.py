@@ -80,7 +80,7 @@ from reachy_mini_conversation_app.personality_routes import (
 )
 from reachy_mini_conversation_app.profile_tool_routes import register_profile_tool_methods
 from reachy_mini_conversation_app.audio.startup_config import apply_audio_startup_config
-from reachy_mini_conversation_app.conversation_handler import ConversationHandler
+from reachy_mini_conversation_app.conversation_handler import ConversationHandler, is_quota_exhausted
 
 
 try:
@@ -331,6 +331,11 @@ class LocalStream:
             return False
 
         logger.info("Sleep phrase detected")
+        self._start_sleep_transition("sleep_phrase")
+        return True
+
+    def _start_sleep_transition(self, reason: str) -> None:
+        """Close the wake gate and put the robot to sleep in the background."""
         self._wake_gate_open = False
         self._wake_gate_event.clear()
         self._conversation_ready.clear()
@@ -338,10 +343,9 @@ class LocalStream:
         self._wake_handler_ready.clear()
         self._restart_requested.set()
         self.clear_audio_queue()
-        asyncio.create_task(self._enter_sleep_mode(), name="wake-word-sleep")
-        return True
+        asyncio.create_task(self._enter_sleep_mode(reason), name="wake-word-sleep")
 
-    async def _enter_sleep_mode(self) -> None:
+    async def _enter_sleep_mode(self, reason: str) -> None:
         """Close the active conversation and move the robot to sleep."""
         try:
             await self._shutdown_active_handler()
@@ -350,8 +354,8 @@ class LocalStream:
                 try:
                     await asyncio.to_thread(self._on_sleep_phrase)
                 except Exception:
-                    logger.exception("Failed to put Reachy Mini to sleep after a sleep phrase")
-            self._emit_phase("sleeping", "sleep_phrase")
+                    logger.exception("Failed to put Reachy Mini to sleep (%s)", reason)
+            self._emit_phase("sleeping", reason)
         finally:
             self._sleep_transition_complete.set()
 
@@ -371,6 +375,9 @@ class LocalStream:
 
         self._wake_gate_event.set()
         await self._wake_handler_ready.wait()
+        # The fresh connection can fail fast and put the robot back to sleep before this wake resumes.
+        if not self._wake_gate_event.is_set():
+            return
         self._wake_gate_open = True
         self._conversation_ready.set()
         self._emit_phase("ready", "wake_word")
@@ -1016,9 +1023,11 @@ class LocalStream:
     async def _run_handler_startup_loop(self) -> None:
         """Start the realtime handler and keep settings UI alive after backend failures."""
         rebuild_required = False
+        sleep_error: BaseException | None = None
         while not self._stop_event.is_set():
             if self._wake_word_detector is not None and not self._wake_gate_open:
-                self._set_backend_connection_state("sleeping")
+                self._set_backend_connection_state("sleeping", sleep_error)
+                sleep_error = None
                 await self._wake_gate_event.wait()
             selected_backend = get_backend_choice()
             if selected_backend != self._active_backend_name or self._restart_requested.is_set() or rebuild_required:
@@ -1058,6 +1067,15 @@ class LocalStream:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
+                if self._wake_word_detector is not None and is_quota_exhausted(e):
+                    logger.error(
+                        "%s backend quota is exhausted: %s. Going to sleep until the next wake word.",
+                        active_backend,
+                        self._format_backend_error(e),
+                    )
+                    sleep_error = e
+                    self._start_sleep_transition("quota_exhausted")
+                    continue
                 self._set_backend_connection_state("disconnected", e)
                 logger.warning(
                     "%s backend failed to start: %s. Settings UI remains available; retrying in %.1f seconds.",

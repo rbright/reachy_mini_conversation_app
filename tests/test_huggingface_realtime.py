@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import numpy as np
 import pytest
+from websockets.frames import Close
+from websockets.exceptions import ConnectionClosedError
 
 import reachy_mini_conversation_app.conversation_handler as conv_mod
 import reachy_mini_conversation_app.huggingface_realtime as hf_mod
@@ -35,17 +37,20 @@ def _make_fake_realtime_client(
     events: tuple[_FakeEvent, ...] = (),
     captured_update: dict[str, Any] | None = None,
     captured_connect: dict[str, Any] | None = None,
+    update_error: BaseException | None = None,
 ) -> Any:
     """Build a fake AsyncOpenAI-shaped client whose realtime session yields `events`.
 
     When given, `captured_update`/`captured_connect` record the kwargs passed to
-    `session.update(...)` / `realtime.connect(...)`.
+    `session.update(...)` / `realtime.connect(...)`, and `update_error` is raised by `session.update(...)`.
     """
 
     class FakeSession:
         async def update(self, **kwargs: Any) -> None:
             if captured_update is not None:
                 captured_update.update(kwargs)
+            if update_error is not None:
+                raise update_error
 
     class FakeNoop:
         async def append(self, **_kw: Any) -> None:
@@ -227,6 +232,32 @@ async def test_partial_transcription_uses_latest_snapshot(monkeypatch: Any) -> N
 
     assert handler.input_transcript_chunks_by_item.item_id == "item-1"
     assert handler.input_transcript_chunks_by_item.deltas == ["Hey, how are you?"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("close_frame", "expected_attempts"),
+    [
+        (Close(1013, "insufficient_quota.credit_balance_exhausted: add credits"), 1),
+        (Close(1011, "keepalive ping timeout"), 3),
+    ],
+)
+async def test_start_up_retries_websocket_closes_except_exhausted_quota(
+    monkeypatch: Any, close_frame: Close, expected_attempts: int
+) -> None:
+    """An exhausted quota fails startup at once; other websocket closes are retried."""
+    handler = _session_handler(monkeypatch, events=())
+    close_error = ConnectionClosedError(close_frame, None)
+    build_client = AsyncMock(return_value=_make_fake_realtime_client(update_error=close_error))
+    monkeypatch.setattr(handler, "_build_realtime_client", build_client)
+    monkeypatch.setattr(hf_mod.asyncio, "sleep", AsyncMock())
+
+    with pytest.raises(ConnectionClosedError) as raised:
+        await handler.start_up()
+
+    assert raised.value is close_error
+    # The Hugging Face handler builds a fresh client before every retry.
+    assert build_client.await_count == expected_attempts
 
 
 @pytest.mark.asyncio
