@@ -8,6 +8,7 @@ from collections.abc import Callable
 
 import numpy as np
 from numpy.typing import NDArray
+from websockets.exceptions import ConnectionClosedError
 
 from reachy_mini_conversation_app.streaming import AudioArray, AdditionalOutputs, AsyncStreamHandler, wait_for_item
 from reachy_mini_conversation_app.idle_policy import start_idle_tool_call
@@ -21,6 +22,15 @@ logger = logging.getLogger(__name__)
 AudioFrame: TypeAlias = tuple[int, NDArray[np.int16]]
 HandlerOutput: TypeAlias = AudioFrame | AdditionalOutputs | None
 QueueItem: TypeAlias = AudioFrame | AdditionalOutputs
+
+
+def is_quota_exhausted(error: BaseException) -> bool:
+    """Return whether the realtime websocket was closed because the provider quota is exhausted."""
+    return (
+        isinstance(error, ConnectionClosedError)
+        and error.rcvd is not None
+        and "insufficient_quota" in error.rcvd.reason
+    )
 
 
 class ConversationHandler(AsyncStreamHandler, ABC):

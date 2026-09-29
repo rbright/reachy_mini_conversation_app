@@ -124,7 +124,7 @@ Copy `.env.example` to `.env` to configure a provider outside the web UI.
 | `OBSIDIAN_SYNC_E2EE_PASSWORD` | End-to-end encryption password of the remote vault. The Settings UI can save or replace it and never returns it to the browser. |
 | `REACHY_MINI_SETTINGS_PIN_HASH` | scrypt hash of the settings PIN. The Settings UI sets it. Remove the line and restart the app to reset the PIN. |
 
-With wake gating enabled, the microphone runs only the local wake-word model until it detects the wake phrase. Reachy wakes and starts a fresh realtime session. A configured sleep phrase closes that session, moves Reachy to its sleep pose, and leaves the local detector running for the next wake phrase. The optional openWakeWord runtime is installed on Linux ARM64 with Python 3.11 or 3.12, which covers the Reachy Mini deployment. On other platforms or when that runtime cannot load, the app logs the error and continues in always-on mode.
+With wake gating enabled, the microphone runs only the local wake-word model until it detects the wake phrase. Reachy wakes and starts a fresh realtime session. A configured sleep phrase closes that session, moves Reachy to its sleep pose, and leaves the local detector running for the next wake phrase. When the provider reports an exhausted quota, Reachy goes to sleep instead of retrying, Settings shows the error, and the next wake phrase tries to connect again. The optional openWakeWord runtime is installed on Linux ARM64 with Python 3.11 or 3.12, which covers the Reachy Mini deployment. On other platforms or when that runtime cannot load, the app logs the error and continues in always-on mode.
 
 ### OpenAI Realtime
 

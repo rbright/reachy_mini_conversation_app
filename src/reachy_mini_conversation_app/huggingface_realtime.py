@@ -51,7 +51,7 @@ from reachy_mini_conversation_app.tools.core_tools import (
     ToolDependencies,
     get_tool_specs,
 )
-from reachy_mini_conversation_app.conversation_handler import ConversationHandler
+from reachy_mini_conversation_app.conversation_handler import ConversationHandler, is_quota_exhausted
 from reachy_mini_conversation_app.tools.background_tool_manager import (
     ToolCallRoutine,
     ToolNotification,
@@ -398,6 +398,8 @@ class OpenAICompatibleRealtimeHandler(ConversationHandler, ABC):
                 # Normal exit from the session, stop retrying
                 return
             except ConnectionClosedError as e:
+                if is_quota_exhausted(e):
+                    raise
                 # Abrupt close (e.g., "no close frame received or sent") → retry
                 logger.warning("Realtime websocket closed unexpectedly (attempt %d/%d): %s", attempt, max_attempts, e)
                 if attempt < max_attempts:

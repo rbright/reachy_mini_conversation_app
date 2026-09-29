@@ -632,7 +632,7 @@ function buildStatusSection() {
         statusRow(
           "Backend",
           backendLabels[backendState] || "Unavailable",
-          backendState === "connected" || backendState === "sleeping"
+          backendState === "connected" || (backendState === "sleeping" && !payload.backend_error)
             ? "ok"
             : backendState === "not_started"
               ? undefined
