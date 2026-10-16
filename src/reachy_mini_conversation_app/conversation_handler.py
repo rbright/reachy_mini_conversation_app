@@ -3,7 +3,7 @@ import time
 import asyncio
 import logging
 from abc import ABC, abstractmethod
-from typing import ClassVar, TypeAlias
+from typing import ClassVar, TypeAlias, TypedDict
 from collections.abc import Callable
 
 import numpy as np
@@ -33,6 +33,19 @@ def is_quota_exhausted(error: BaseException) -> bool:
     )
 
 
+class VADStatus(TypedDict):
+    """Snapshot of local speech detection and playback interruption state."""
+
+    timestamp: float
+    available: bool
+    probability: float | None
+    local_speech: bool
+    server_speech: bool
+    listening: bool
+    barge_in_candidate: bool
+    playback_gain: float
+
+
 class ConversationHandler(AsyncStreamHandler, ABC):
     """Shared app handler contract and idle behavior for realtime conversation backends."""
 
@@ -47,10 +60,20 @@ class ConversationHandler(AsyncStreamHandler, ABC):
     _activity_observer: Callable[[str], None] | None = None
     _transcript_observer: Callable[[str, str, bool], None] | None = None
     _transcript_command_handler: Callable[[str], bool] | None = None
+    _latency_observer: Callable[[dict[str, int | str | None]], None] | None = None
+    _vad_observer: Callable[[VADStatus], None] | None = None
 
     def __init__(self) -> None:
         """Initialize the stream handler and shared idle/activity tracking."""
         super().__init__()
+        self.paced_playback = False
+        self.playback_gain = 1.0
+        self.playback_epoch = 0
+        self.playback_frame_epochs: dict[int, int] = {}
+        self.playback_until = 0.0
+        self.playback_pending_frames = 0
+        self.playback_ready = asyncio.Event()
+        self.playback_ready.set()
         self.last_activity_time = time.monotonic()
         self.last_idle_behavior_time = self.last_activity_time
 
@@ -77,6 +100,14 @@ class ConversationHandler(AsyncStreamHandler, ABC):
             logger.exception("Transcript command handler failed")
             return False
 
+    def set_latency_observer(self, observer: Callable[[dict[str, int | str | None]], None] | None) -> None:
+        """Attach/detach a per-response latency observer. Pass None to clear."""
+        self._latency_observer = observer
+
+    def set_vad_observer(self, observer: Callable[[VADStatus], None] | None) -> None:
+        """Attach or detach an observer for local VAD diagnostics."""
+        self._vad_observer = observer
+
     def _emit_transcript(self, role: str, text: str, final: bool = True) -> None:
         """Forward one transcript chunk to the observer, if attached."""
         observer = self._transcript_observer
@@ -85,6 +116,14 @@ class ConversationHandler(AsyncStreamHandler, ABC):
                 observer(role, text, final)
             except Exception:
                 logger.debug("transcript observer raised (ignored)", exc_info=True)
+
+    def _emit_latency(self, latency: dict[str, int | str | None]) -> None:
+        """Forward one response's latency breakdown to the observer, if attached."""
+        if self._latency_observer is not None:
+            try:
+                self._latency_observer(latency)
+            except Exception:
+                logger.debug("latency observer raised (ignored)", exc_info=True)
 
     def _mark_activity(self, reason: str) -> None:
         """Record non-idle conversation activity for the idle timer."""
@@ -160,6 +199,15 @@ class ConversationHandler(AsyncStreamHandler, ABC):
         """Apply a personality profile."""
         ...
 
+    async def refresh_instructions(self) -> bool:
+        """Rebuild the session instructions and push them to a live session.
+
+        Long-term memory is part of the prompt, so erasing it only reaches the
+        model once its instructions are replaced. Returns whether a live
+        session was updated; False means the next session picks it up anyway.
+        """
+        return False
+
     @abstractmethod
     async def get_available_voices(self) -> list[str]:
         """Return voices available for the active backend."""
@@ -183,4 +231,9 @@ class ConversationHandler(AsyncStreamHandler, ABC):
         model voices, not a guaranteed-literal string. Raises if no session is
         open.
         """
+        ...
+
+    @abstractmethod
+    async def interrupt(self) -> None:
+        """Stop playback and cancel the response still being generated."""
         ...

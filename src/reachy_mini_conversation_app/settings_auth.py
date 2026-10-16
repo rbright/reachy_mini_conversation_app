@@ -5,10 +5,11 @@ Two checks protect the endpoint:
 - The WebSocket upgrade is refused when the request has an `Origin` header that is not the app's own
   origin (same scheme, host, and port). A browser always sends `Origin`, so another site cannot drive `/rpc`.
   Clients that are not browsers (the daemon relay) send no `Origin` and stay accepted.
-- A privileged settings method (secrets, Obsidian account and vault access, backend, personality, and tool
-  configuration) runs only when the call carries the settings PIN in `settings_pin`. The app keeps only a
-  scrypt hash of the PIN, in the instance `.env`. When no PIN is set, privileged methods are refused and the
-  first `settings.set_pin` call sets it. To reset a PIN, remove its `.env` line and restart the app.
+- A privileged settings method (secrets, Obsidian account and vault access, backend, speech, language, camera,
+  personality, memory, and tool configuration) runs only when the call carries the settings PIN in `settings_pin`.
+  `memory.list` is privileged because it returns personal facts. The app keeps only a scrypt hash of the PIN, in
+  the instance `.env`. When no PIN is set, privileged methods are refused and the first `settings.set_pin` call
+  sets it. To reset a PIN, remove its `.env` line and restart the app.
 """
 
 import os
@@ -43,6 +44,11 @@ PIN_LOCKOUT_SECONDS = 60.0
 PRIVILEGED_METHODS = frozenset(
     {
         "backend.config",
+        "language.set",
+        "memory.clear",
+        "memory.forget",
+        "memory.list",
+        "memory.set_enabled",
         "obsidian.login",
         "obsidian.list_vaults",
         "obsidian.configure",
@@ -52,8 +58,10 @@ PRIVILEGED_METHODS = frozenset(
         "profile_vault_access.save",
         "profile_tools.save",
         "profile_tools.reset",
+        "speech.config",
         "tool_spaces.add",
         "tool_spaces.remove",
+        "vision.set",
     }
 )
 

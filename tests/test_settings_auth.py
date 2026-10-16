@@ -23,9 +23,20 @@ from reachy_mini_conversation_app.settings_auth import (
     SettingsRpcServer,
     hash_settings_pin,
 )
+from reachy_mini_conversation_app.tools.core_tools import ToolDependencies
 
 
 PIN = "correct-pin"
+# Settings guarded since the upstream v1.1.0 merge, each with params that its handler accepts.
+MEMORY_LANGUAGE_VISION_SPEECH_CALLS: dict[str, dict[str, Any]] = {
+    "memory.list": {},
+    "memory.forget": {"query": "coffee"},
+    "memory.clear": {},
+    "memory.set_enabled": {"enabled": True},
+    "language.set": {"language": "fr"},
+    "vision.set": {"enabled": False},
+    "speech.config": {},
+}
 
 
 @pytest.fixture(autouse=True)
@@ -186,6 +197,7 @@ def _settings_app(instance_path: Path | None) -> FastAPI:
         SimpleNamespace(media=SimpleNamespace(audio=None, backend=None)),
         settings_app=app,
         instance_path=str(instance_path) if instance_path is not None else None,
+        tool_deps=ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()),
     )
     stream._init_settings_ui_if_needed()
     return app
@@ -201,6 +213,27 @@ def test_settings_app_protects_every_privileged_method(tmp_path: Path) -> None:
     assert refused == dict.fromkeys(sorted(PRIVILEGED_METHODS), "settings_pin_required")
     assert "result" in _call(client, "obsidian.status")
     assert "result" in _call(client, "conversation.status")
+
+
+@pytest.mark.parametrize(("method", "params"), list(MEMORY_LANGUAGE_VISION_SPEECH_CALLS.items()))
+def test_settings_app_guards_memory_language_vision_and_speech_settings(
+    tmp_path: Path, method: str, params: dict[str, Any]
+) -> None:
+    """A memory, language, camera, or speech setting is refused without the PIN and runs with it."""
+    client = TestClient(_settings_app(tmp_path))
+    os.environ[SETTINGS_PIN_HASH_ENV] = hash_settings_pin(PIN)
+
+    assert _reason(_call(client, method, params)) == "settings_pin_required"
+    assert "result" in _call(client, method, {**params, "settings_pin": PIN})
+
+
+@pytest.mark.parametrize("method", ["conversation.history", "language.get", "vision.get"])
+def test_settings_app_serves_history_and_getters_without_a_pin(tmp_path: Path, method: str) -> None:
+    """The Talk view history and the language and camera getters need no PIN."""
+    client = TestClient(_settings_app(tmp_path))
+    os.environ[SETTINGS_PIN_HASH_ENV] = hash_settings_pin(PIN)
+
+    assert "result" in _call(client, method)
 
 
 def test_settings_app_stores_only_a_pin_hash_and_accepts_the_pin(tmp_path: Path) -> None:

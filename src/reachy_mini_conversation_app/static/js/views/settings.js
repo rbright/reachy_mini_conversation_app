@@ -1,4 +1,4 @@
-/** Settings view: provider connection, voice, Obsidian Sync, vault access, and runtime status. */
+/** Settings view: provider connection, voice, speech behavior, Obsidian Sync, vault access, and runtime status. */
 
 import {
   applyVoice,
@@ -12,9 +12,10 @@ import {
   obsidianLogin,
   obsidianLogout,
   saveBackendConfig,
+  saveSpeechConfig,
   untilReady,
 } from "../api.js";
-import { BACKENDS } from "../constants.js";
+import { BACKENDS, SHOW_LATENCIES_KEY } from "../constants.js";
 import { buildProfileVaultAccessSection } from "../components/vault-access.js";
 import { h } from "../ui.js";
 
@@ -51,7 +52,7 @@ export async function mountSettingsView({ outlet, signal }) {
   const connectionSection = buildConnectionSection({
     onSaved: () =>
       Promise.all([
-        refreshStatus({ statusSection, connectionSection, signal }),
+        refreshStatus({ statusSection, connectionSection, speechSection, signal }),
         refreshVoices({ voiceSection, signal }),
       ]),
   });
@@ -59,6 +60,8 @@ export async function mountSettingsView({ outlet, signal }) {
   const obsidianSection = buildObsidianSection({ signal });
   const vaultAccessSection = buildProfileVaultAccessSection({ signal });
   const statusSection = buildStatusSection();
+  const speechSection = buildSpeechSection();
+  const developerSection = buildDeveloperSection();
 
   const view = h(
     "section",
@@ -67,18 +70,24 @@ export async function mountSettingsView({ outlet, signal }) {
       "header",
       { class: "view-header" },
       h("h1", { class: "view-title" }, "Settings"),
-      h("p", { class: "view-subtitle" }, "Connection, voice, Obsidian Sync, and runtime state for Reachy Mini.")
+      h(
+        "p",
+        { class: "view-subtitle" },
+        "Connection, voice, speech behavior, Obsidian Sync, and runtime state for Reachy Mini."
+      )
     ),
     connectionSection.element,
     voiceSection.element,
+    speechSection.element,
     obsidianSection.element,
     vaultAccessSection.element,
-    statusSection.element
+    statusSection.element,
+    developerSection
   );
   outlet.replaceChildren(view);
 
   await Promise.all([
-    refreshStatus({ statusSection, connectionSection, signal }),
+    refreshStatus({ statusSection, connectionSection, speechSection, signal }),
     refreshVoices({ voiceSection, signal }),
     obsidianSection.refresh(),
     vaultAccessSection.refresh(),
@@ -326,6 +335,95 @@ function buildVoiceSection() {
       status.textContent = "";
     },
   };
+}
+
+function buildSpeechSection() {
+  const localVad = h("input", { type: "checkbox", name: "local_vad_enabled", disabled: "disabled" });
+  const localBargeIn = h("input", { type: "checkbox", name: "local_barge_in_enabled", disabled: "disabled" });
+  const status = h("p", { class: "settings-status", role: "status", "aria-live": "polite" });
+  const submitButton = h("button", { type: "submit", class: "btn btn--primary", disabled: "disabled" }, "Save speech settings");
+  const providerHint = h("p", { class: "settings-hint", style: { display: "none" } },
+    "Local speech detection and barge-in work with the Hugging Face provider only.");
+  const form = h("form", { class: "settings-form" },
+    h("label", { class: "settings-toggle" }, localVad,
+      h("span", {}, h("strong", {}, "Local speech detection"),
+        h("span", { class: "settings-hint" }, "Detect speech on the robot to pause antenna and idle movement sooner."))),
+    h("label", { class: "settings-toggle" }, localBargeIn,
+      h("span", {}, h("strong", {}, "Local barge-in"),
+        h("span", { class: "settings-hint" }, "Stop the robot's speech sooner when you speak. Requires local speech detection."))),
+    h("p", { class: "settings-hint" }, "Changes are saved and reconnect the conversation to apply."),
+    providerHint,
+    h("div", { class: "settings-actions" }, submitButton), status);
+  const element = h("section", { class: "settings-section" },
+    h("h2", { class: "settings-section-title" }, "Speech behavior"), form);
+
+  localVad.addEventListener("change", () => { localBargeIn.disabled = !localVad.checked; });
+
+  form.addEventListener("submit", async event => {
+    event.preventDefault();
+    if (submitButton.disabled) return;
+    submitButton.disabled = true;
+    localVad.disabled = true;
+    localBargeIn.disabled = true;
+    form.setAttribute("aria-busy", "true");
+    status.classList.remove("is-error");
+    status.textContent = "Saving…";
+    try {
+      const result = await saveSpeechConfig({ local_vad_enabled: localVad.checked, local_barge_in_enabled: localBargeIn.checked });
+      localVad.checked = result.local_vad_enabled;
+      localBargeIn.checked = result.local_barge_in_enabled;
+      status.textContent = result.message || "Saved.";
+    } catch (error) {
+      status.textContent = `Failed to save: ${describeError(error)}`;
+      status.classList.add("is-error");
+    } finally {
+      submitButton.disabled = false;
+      localVad.disabled = false;
+      localBargeIn.disabled = !localVad.checked;
+      form.removeAttribute("aria-busy");
+    }
+  });
+  return {
+    element,
+    syncFromStatus(payload) {
+      const isOpenAI = payload.backend_provider === BACKENDS.OPENAI;
+      localVad.checked = payload.local_vad_enabled;
+      localBargeIn.checked = payload.local_barge_in_enabled;
+      localVad.disabled = isOpenAI;
+      localBargeIn.disabled = isOpenAI || !localVad.checked;
+      submitButton.disabled = isOpenAI;
+      providerHint.style.display = isOpenAI ? "" : "none";
+    },
+  };
+}
+
+function buildDeveloperSection() {
+  const showLatencies = h("input", {
+    type: "checkbox",
+    name: "show_latencies",
+    checked: localStorage.getItem(SHOW_LATENCIES_KEY) === "1",
+    onChange: (event) => localStorage.setItem(SHOW_LATENCIES_KEY, event.target.checked ? "1" : "0"),
+  });
+  return h(
+    "details",
+    { class: "settings-section settings-developer" },
+    h("summary", { class: "settings-section-title" }, "Developer options"),
+    h(
+      "div",
+      { class: "settings-form" },
+      h(
+        "label",
+        { class: "settings-toggle" },
+        showLatencies,
+        h(
+          "span",
+          {},
+          h("strong", {}, "Show response latencies"),
+          h("span", { class: "settings-hint" }, "Adds the backend's timing breakdown under each reply in the conversation panel.")
+        )
+      )
+    )
+  );
 }
 
 function buildObsidianSection({ signal }) {
@@ -670,12 +768,13 @@ function formatHfTarget(payload) {
   return `${host}:${port || DEFAULT_HF_PORT}`;
 }
 
-async function refreshStatus({ statusSection, connectionSection, signal }) {
+async function refreshStatus({ statusSection, connectionSection, speechSection, signal }) {
   try {
     const payload = await untilReady(getStatus, signal);
     if (signal.aborted) return;
     statusSection.render(payload);
     connectionSection.syncFromStatus(payload);
+    speechSection.syncFromStatus(payload);
   } catch (error) {
     if (signal.aborted) return;
     statusSection.renderUnavailable(error);
