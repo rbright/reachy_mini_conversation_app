@@ -21,6 +21,7 @@ class RpcError extends Error {
 let socket = null;
 let connecting = null;
 let reconnectTimer = null; // one pending retry at most
+let retryFailureLogged = false; // one warning per outage
 let rpcCounter = 0;
 const pending = new Map(); // id -> { resolve, reject, timer }
 const subscribers = new Map(); // method -> Set<cb>
@@ -36,6 +37,7 @@ function connect() {
     ws.onopen = () => {
       opened = true;
       connecting = null;
+      retryFailureLogged = false;
       resolve();
     };
     ws.onmessage = (ev) => handleMessage(JSON.parse(ev.data));
@@ -48,12 +50,16 @@ function connect() {
       }
       pending.clear();
       if (!opened) reject(new RpcError("cannot reach /rpc", "disconnected"));
-      // Keep the event stream alive while anyone is listening, across drops and when the
-      // page loads before the app has mounted /rpc. One retry chain at most.
+      // Keep the event stream alive while anyone listens, also before the app has mounted /rpc.
       if (subscribers.size > 0 && reconnectTimer === null) {
         reconnectTimer = setTimeout(() => {
           reconnectTimer = null;
-          if (subscribers.size > 0) connect().catch(() => {});
+          if (subscribers.size === 0) return;
+          connect().catch((error) => {
+            if (retryFailureLogged) return;
+            retryFailureLogged = true;
+            console.warn("Cannot reconnect to /rpc, retrying:", error);
+          });
         }, 1000);
       }
     };
