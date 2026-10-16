@@ -174,7 +174,7 @@ def test_migration_keeps_vault_symlinks_as_links(tmp_path: Path, monkeypatch: py
 
     migrated = target / "obsidian" / "Emma" / "note.md"
     assert migrated.is_symlink()
-    assert migrated.readlink() == secret
+    assert migrated.resolve() == secret.resolve()
 
 
 def test_unusable_path_falls_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
