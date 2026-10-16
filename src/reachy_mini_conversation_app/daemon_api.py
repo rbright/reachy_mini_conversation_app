@@ -8,6 +8,7 @@ import json
 import urllib.error
 import urllib.request
 from typing import Any
+from http.client import IncompleteRead
 
 from reachy_mini import ReachyMini
 
@@ -18,10 +19,11 @@ DEFAULT_TIMEOUT_S = 2.0
 class DaemonApiError(RuntimeError):
     """Raised when a daemon REST call fails."""
 
-    def __init__(self, message: str, status_code: int | None = None) -> None:
-        """Store the message and, for HTTP errors, the status code."""
+    def __init__(self, message: str, status_code: int | None = None, detail: str | None = None) -> None:
+        """Store the message and, for HTTP errors, the status code and detail."""
         super().__init__(message)
         self.status_code = status_code
+        self.detail = detail
 
 
 def daemon_request(
@@ -47,7 +49,19 @@ def daemon_request(
         with urllib.request.urlopen(request, timeout=timeout_s) as response:
             body = response.read()
     except urllib.error.HTTPError as e:
-        raise DaemonApiError(f"{method} {path} failed: HTTP {e.code}", status_code=e.code) from e
+        message = f"{method} {path} failed: HTTP {e.code}"
+        try:
+            with e:
+                error_body = e.read()
+            error_response: object = json.loads(error_body) if error_body else None
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError, IncompleteRead) as body_error:
+            raise DaemonApiError(f"{message}; could not read error detail: {body_error}", status_code=e.code) from e
+        detail = error_response.get("detail") if isinstance(error_response, dict) else None
+        if not isinstance(detail, str):
+            detail = None
+        if detail is not None:
+            message = f"{message}: {detail}"
+        raise DaemonApiError(message, status_code=e.code, detail=detail) from e
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         raise DaemonApiError(f"{method} {path} failed: {e}") from e
 

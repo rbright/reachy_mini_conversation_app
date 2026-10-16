@@ -36,7 +36,7 @@ Conversational app for the Reachy Mini robot combining realtime voice, vision, p
 - Low-latency audio conversation through either the supported Hugging Face backend or the direct OpenAI Realtime API.
 - Vision is handled by the realtime backend when the `camera` tool is used.
 - Layered motion system queues primary moves (dances, emotions, goto poses, breathing) while blending speech-reactive wobble.
-- Async tools integrate motion, camera capture, and MCP Tool Spaces. The optional web UI (`--ui`) manages conversations, personalities, tools, and settings.
+- Async tools integrate motion, camera capture, and MCP Tool Spaces. The optional web UI (`--ui`) manages conversations, personalities, tools, and settings, and its Talk view can show the live transcript. The backend's per-turn latencies appear there when **Settings → Developer options → Show response latencies** is on; the choice is saved across launches.
 
 ## Architecture
 
@@ -105,7 +105,9 @@ Copy `.env.example` to `.env` to configure a provider outside the web UI.
 | `BACKEND_PROVIDER` | Realtime provider: `huggingface` (default) or `openai`. The Settings UI persists this choice. |
 | `OPENAI_API_KEY` | API key for direct OpenAI Realtime sessions. The Settings UI can save or replace it and never returns it to the browser. |
 | `OPENAI_REALTIME_MODEL` | Direct OpenAI Realtime model. Defaults to `gpt-realtime-2.1`; supported values are shown in the Settings UI. |
-| `REALTIME_TRANSCRIPTION_LANGUAGE` | Optional input transcription language for the realtime backend. Defaults to `en`; set to a backend-supported code such as `zh` for Chinese. |
+| `REALTIME_TRANSCRIPTION_LANGUAGE` | Optional input transcription language for the realtime backend. Defaults to `auto` for automatic language detection; set to a backend-supported code such as `en` for English or `zh` for Chinese to fix the language. |
+| `LOCAL_BARGE_IN_ENABLED` | Local audio interruption. Hugging Face provider only. Defaults to `true`; requires `LOCAL_VAD_ENABLED=true`. |
+| `LOCAL_VAD_ENABLED` | Local Silero speech detection for faster physical listening reactions. Hugging Face provider only. Defaults to `true`; set to `false` to use server VAD alone for movement. |
 | `HF_REALTIME_CONNECTION_MODE` | Hugging Face connection selector: `deployed` uses the built-in Hugging Face server; `local` uses `HF_REALTIME_WS_URL`. Defaults to `deployed`. |
 | `HF_REALTIME_WS_URL` | Direct websocket endpoint for your own Hugging Face backend. Accepts either a base URL like `ws://127.0.0.1:8765/v1` or the full websocket URL `ws://127.0.0.1:8765/v1/realtime`. Used when `HF_REALTIME_CONNECTION_MODE=local`. |
 | `HF_TOKEN` | Optional token for Hugging Face access. Local endpoints receive only this explicitly configured token. |
@@ -123,8 +125,35 @@ Copy `.env.example` to `.env` to configure a provider outside the web UI.
 | `OBSIDIAN_SYNC_CONFLICT_STRATEGY` | `merge` (default) or `conflict`. |
 | `OBSIDIAN_SYNC_E2EE_PASSWORD` | End-to-end encryption password of the remote vault. The Settings UI can save or replace it and never returns it to the browser. |
 | `REACHY_MINI_SETTINGS_PIN_HASH` | scrypt hash of the settings PIN. The Settings UI sets it. Remove the line and restart the app to reset the PIN. |
+| `REACHY_MINI_INSTANCE_PATH` | Directory for this instance's data: long-term memory, user personalities and settings. Applies when the app starts as a Reachy Mini app (from the daemon or dashboard). Defaults to `conversation_app` beside the daemon's own config (`~/.config/reachy_mini` on Linux). Data written by an older version inside the installed package is copied over once. See [Instance directory](#instance-directory). |
+| `REACHY_MINI_MEMORY_ENABLED` | Long-term memory. When `false`, remembered facts stay on disk but are not injected into the prompt, and the `remember` / `forget` tools decline. Defaults to `true`. |
+| `REACHY_MINI_CAMERA_ENABLED` | Camera tool. `--no-camera` forces it off regardless. Defaults to `true`. |
+
+These variables are the starting value. What you change through the settings UI
+(or from the mobile app) is written to `settings.json` in the instance directory
+and wins over them, so a toggle always does what it says.
+
+The backend provider, OpenAI key and model, wake-word, Obsidian, and settings PIN values are not in `settings.json`. The Settings UI writes them to the instance `.env`.
+
+Local speech detection and local barge-in apply only to the Hugging Face provider. The OpenAI provider uses server VAD alone, as before.
+
+`LOCAL_VAD_ENABLED` defaults to `true`. Change **Local speech detection** in the gear-wheel **Settings → Speech behavior** view. Saved choices take precedence over environment defaults and persist across launches; saving reconnects the conversation to apply the change. Local Silero VAD and server VAD both control physical listening: either detector freezes the antennas and suppresses idle movement. Movement resumes smoothly once both report silence. Local detection holds through 400 ms of silence and clears after 500 ms without microphone frames. Model history clears after each completed speech segment and after 500 ms of consecutive low-confidence idle audio (512 ms at the 32 ms inference cadence). These resets preserve pending microphone samples and context during speech and within-segment pauses. It uses the SDK's 16 kHz microphone audio; conversation turns continue to use server VAD. If local detection fails, the app logs a warning and uses server VAD alone.
+
+Local barge-in defaults to enabled. Change **Local barge-in** in **Settings → Speech behavior**, or set `LOCAL_BARGE_IN_ENABLED=false` to disable it when no saved preference exists. It requires local speech detection; disabling that switch also disables local interruption while preserving the saved barge-in preference. While audio is buffered or being submitted for playback (plus a 100 ms trailing margin), a Silero speech candidate lowers upcoming playback to 25% amplitude. Playback only stops once server VAD confirms the user turn, so loud background speech ducks the robot without dropping its answer; late audio from the interrupted response is discarded. A rejected candidate restores normal volume after 64 ms of silence. Server interruptions remain enabled, and microphone audio continues streaming to the backend. Playback is fed to the SDK in paced 20 ms chunks; already-submitted audio and SDK/transport latency delay audible volume changes. This is experimental: speaker echo, motor noise, audible latency and CPU overhead still need robot testing. With `--debug`, open `/static/vad-monitor.html` on the app settings server for a read-only live monitor with completed user and robot transcripts. The transcript view keeps the last 100 turns received while the page is open and clears on refresh. The `/rpc` WebSocket emits `conversation.vad` diagnostics with a Unix timestamp, the latest Silero speech probability, local/server/combined listening states, barge-in candidate and playback gain. Probability updates are limited to 10 Hz; state changes are reported immediately. Diagnostics reuse existing inference and do not change the inactivity timer.
+
+On the first startup with local VAD enabled, the app downloads the [Silero VAD v6.2.1 model and MIT license](https://github.com/snakers4/silero-vad/tree/v6.2.1) directly from the pinned upstream commit and verifies their SHA-256 checksums. They are stored in the Hugging Face assets cache (`HF_HOME/assets`, or `HF_ASSETS_CACHE` when set), like the cached emotion recordings. Later starts reuse the files without a network request. The model runs on CPU with ONNX Runtime. If the download or model load fails, the app logs a warning and continues with server VAD alone.
 
 With wake gating enabled, the microphone runs only the local wake-word model until it detects the wake phrase. Reachy wakes and starts a fresh realtime session. A configured sleep phrase closes that session, moves Reachy to its sleep pose, and leaves the local detector running for the next wake phrase. When the provider reports an exhausted quota, Reachy goes to sleep instead of retrying, Settings shows the error, and the next wake phrase tries to connect again. The optional openWakeWord runtime is installed on Linux ARM64 with Python 3.11 or 3.12, which covers the Reachy Mini deployment. On other platforms or when that runtime cannot load, the app logs the error and continues in always-on mode.
+
+While Reachy sleeps, local speech detection does not freeze the antennas, stop idle movement, or duck playback.
+
+### Instance directory
+
+When the app starts as a Reachy Mini app (from the daemon or dashboard), it keeps its instance data in one directory: the instance `.env`, `settings.json`, long-term memory (`memory.v1.json`), startup settings, user personalities, tool access overrides, installed tool Spaces, personality vault access, and synced Obsidian vaults. The default is `conversation_app` beside the daemon's own config (`~/.config/reachy_mini/conversation_app` on Linux). Set `REACHY_MINI_INSTANCE_PATH` in the process environment to use another directory; the instance `.env` is inside that directory, so a value written there is read too late.
+
+The standalone `reachy-mini-conversation-app --ui` run keeps its data in `$XDG_DATA_HOME/reachy_mini_conversation_app` (default `~/.local/share/reachy_mini_conversation_app`); without `--ui` it uses no instance directory. `REACHY_MINI_INSTANCE_PATH` and the migration below do not apply to standalone runs.
+
+Older versions kept this data inside the installed package. On the first start as a Reachy Mini app after the update, the app copies each legacy item into the new directory, then writes a `.migrated` marker. The copy runs once: data you delete later does not come back. Items that already exist in the new directory are not overwritten, and the legacy copy stays where it was. The robot keeps its settings PIN, wake-word, provider, and Obsidian settings, Obsidian sign-in and vault access, personalities, and installed tool Spaces. If the new directory cannot be created, the app logs a warning and keeps using the legacy location.
 
 ### OpenAI Realtime
 
@@ -136,7 +165,7 @@ OPENAI_API_KEY=your-api-key
 OPENAI_REALTIME_MODEL=gpt-realtime-2.1
 ```
 
-The API key is stored only in the instance `.env`. Enter a new key in Settings to replace it. The UI reports only whether a key exists.
+The API key is stored only in the instance `.env`. Enter a new key in Settings to replace it. The UI reports only whether a key exists. When `REALTIME_TRANSCRIPTION_LANGUAGE` is `auto`, the app sends no transcription language and OpenAI detects it.
 
 ### Hugging Face Connection Modes
 
@@ -184,6 +213,8 @@ In the web UI's Settings view, select Hugging Face or OpenAI Realtime. Hugging F
 The web UI talks to the app over the `/rpc` WebSocket on port 7860. The app refuses a WebSocket upgrade whose `Origin` header is not the app's own origin (scheme, host, and port), so a page on another site cannot use `/rpc`.
 
 Settings that change secrets, the Obsidian account, vault access, the backend, personality definitions, or tools need the settings PIN. The first time you change one of them, the UI asks you to set a PIN of 6 or more characters. After that, it asks for the PIN once per page load. The app stores only a scrypt hash in the instance `.env`. After 5 wrong PINs, the app refuses all PINs for 60 seconds. You cannot change the PIN in the UI: remove `REACHY_MINI_SETTINGS_PIN_HASH` from the instance `.env`, restart the app, and set a new PIN.
+
+The PIN also guards long-term memory (list, forget, clear, and turn on or off) and changes to the transcription language, camera, and speech behavior settings. Reading the conversation history and the current language and camera settings needs no PIN.
 
 Until you set a PIN, the app refuses these settings. The first client to set the PIN owns it, so set it soon after you install or update the app.
 
@@ -290,9 +321,11 @@ Every bundled profile enables `head_tracking` by default; users can still disabl
 | `pollen_robotics_reachy_mini_search_tool__search_web` | Search the web and return a short list of results. | Preinstalled MCP Space: `pollen-robotics/reachy-mini-search-tool`. |
 | `pollen_robotics_reachy_mini_weather_tool__get_weather` | Report today's weather for a place: current conditions, high and low temperature, and rain chance. | Preinstalled MCP Space: `pollen-robotics/reachy-mini-weather-tool`. |
 | `pollen_robotics_reachy_mini_time_tool__get_time` | Report the current time for a timezone or the user's local time, or the difference between two timezones. | Preinstalled MCP Space: `pollen-robotics/reachy-mini-time-tool`. |
+| `pollen_robotics_reachy_mini_knowledge_tool__get_info` | Read the official overview, capabilities, versions, and prices for a Pollen Robotics product or the company. | Preinstalled MCP Space: `pollen-robotics/reachy-mini-knowledge-tool`. |
+| `pollen_robotics_reachy_mini_knowledge_tool__search_docs` | Search the official Reachy Mini FAQ and troubleshooting documentation. | Preinstalled MCP Space: `pollen-robotics/reachy-mini-knowledge-tool`. |
 
 > [!NOTE]
-> `remember`/`forget` facts are stored in `memory.v1.json` inside the app's instance data directory (`~/.local/share/reachy_mini_conversation_app/` by default, or the instance path used by the desktop launcher). `forget` only removes facts matched by query. To reset all remembered facts, delete this file.
+> `remember`/`forget` facts are stored in `memory.v1.json` inside the app's [instance directory](#instance-directory). `forget` only removes facts matched by query. To reset all remembered facts, delete this file.
 
 ## Creating and adding tools
 
@@ -455,7 +488,7 @@ reachy-mini-conversation-app tool-spaces list
 reachy-mini-conversation-app tool-spaces remove owner/space-name
 ```
 
-Bundled Pollen Spaces use static specs and are enabled by the default profile. Custom Spaces are validated through the Hugging Face Hub; HF tokens are sent only to private Spaces. Tool metadata is cached in:
+Bundled Pollen Spaces use static specs and are enabled by the default profile. Newly bundled Spaces are added to existing installations without restoring older tools the user removed. Custom Spaces are validated through the Hugging Face Hub; HF tokens are sent only to private Spaces. Tool metadata is cached in:
 
 - `installed_tool_spaces.json` in the managed app instance directory
 - `external_content/installed_tool_spaces.json` in terminal mode

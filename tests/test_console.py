@@ -3,6 +3,7 @@
 import os
 import stat
 import time
+import base64
 import asyncio
 import threading
 from types import SimpleNamespace
@@ -22,6 +23,7 @@ from websockets.exceptions import ConnectionClosedError
 
 import reachy_mini_conversation_app.console as console_mod
 import reachy_mini_conversation_app.vault_session as vault_session_mod
+import reachy_mini_conversation_app.huggingface_realtime as realtime_mod
 from reachy_mini_conversation_app import obsidian_sync
 from reachy_mini_conversation_app.config import (
     HF_AVAILABLE_VOICES,
@@ -35,14 +37,18 @@ from reachy_mini_conversation_app.wake_word import WakeWordEvent
 from reachy_mini_conversation_app.obsidian_sync import ObsidianSyncSupervisor
 from reachy_mini_conversation_app.settings_auth import PRIVILEGED_METHODS, SETTINGS_PIN_PARAM, hash_settings_pin
 from reachy_mini_conversation_app.vault_session import VaultSession
+from reachy_mini_conversation_app.settings_store import AppSettings, read_settings, update_settings
+from reachy_mini_conversation_app.openai_realtime import OpenAIRealtimeHandler
 from reachy_mini_conversation_app.startup_settings import (
     StartupSettings,
     load_startup_settings_into_runtime,
 )
+from reachy_mini_conversation_app.tools.core_tools import ToolDependencies
 from reachy_mini_conversation_app.personality_routes import (
     RouteError,
     build_personality_ops,
 )
+from reachy_mini_conversation_app.huggingface_realtime import HuggingFaceRealtimeHandler
 from reachy_mini_conversation_app.profile_vault_access import (
     SessionNoteTarget,
     ProfileVaultAccess,
@@ -97,40 +103,24 @@ async def _wait_until(predicate: Any, timeout: float = 1.0) -> None:
     raise AssertionError("Timed out waiting for condition")
 
 
-def test_clear_audio_queue_prefers_clear_player() -> None:
-    """clear_player() is the canonical flush and is used whenever available."""
+@pytest.mark.asyncio
+async def test_clear_audio_queue_flushes_the_sdk_player() -> None:
+    """clear_player() flushes SDK playback and the pending output is dropped."""
     handler = MagicMock()
     handler.output_queue = asyncio.Queue()
     handler.output_queue.put_nowait((24000, np.zeros(4, dtype=np.int16)))
-    audio = SimpleNamespace(
-        clear_player=MagicMock(),
-        clear_output_buffer=MagicMock(),
-    )
+    audio = SimpleNamespace(clear_player=MagicMock())
     robot = SimpleNamespace(media=SimpleNamespace(audio=audio))
     stream = LocalStream(handler, robot)
 
-    stream.clear_audio_queue()
+    await stream.clear_audio_queue()
 
     audio.clear_player.assert_called_once()
-    audio.clear_output_buffer.assert_not_called()
     assert handler.output_queue.empty()
 
 
-def test_clear_audio_queue_falls_back_to_output_buffer() -> None:
-    """Older SDKs without clear_player() still flush via clear_output_buffer()."""
-    handler = MagicMock()
-    handler.output_queue = asyncio.Queue()
-    audio = SimpleNamespace(clear_output_buffer=MagicMock())  # no clear_player
-    robot = SimpleNamespace(media=SimpleNamespace(audio=audio))
-    stream = LocalStream(handler, robot)
-
-    stream.clear_audio_queue()
-
-    audio.clear_output_buffer.assert_called_once()
-    assert handler.output_queue.empty()
-
-
-def test_clear_audio_queue_drains_queue_in_place() -> None:
+@pytest.mark.asyncio
+async def test_clear_audio_queue_drains_queue_in_place() -> None:
     """The output queue is drained in place, not replaced with a new object."""
     handler = MagicMock()
     queue: asyncio.Queue[Any] = asyncio.Queue()
@@ -141,7 +131,7 @@ def test_clear_audio_queue_drains_queue_in_place() -> None:
     robot = SimpleNamespace(media=SimpleNamespace(audio=audio))
     stream = LocalStream(handler, robot)
 
-    stream.clear_audio_queue()
+    await stream.clear_audio_queue()
 
     assert handler.output_queue is queue  # same object, not replaced
     assert queue.empty()
@@ -210,6 +200,8 @@ async def test_activity_from_rebuilt_handler_reaches_rpc_clients() -> None:
     """Activity from a rebuilt handler must still reach /rpc subscribers."""
 
     class FakeHandler:
+        set_vad_observer = MagicMock()
+
         def __init__(self) -> None:
             self.observer: Any = None
 
@@ -339,9 +331,30 @@ def test_backend_config_persists_local_hf_selection_and_status(
     assert data["hf_direct_host"] == "localhost"
     assert data["hf_direct_port"] == 8765
 
-    env_text = (tmp_path / ".env").read_text(encoding="utf-8")
-    assert "HF_REALTIME_CONNECTION_MODE=local" in env_text
-    assert "HF_REALTIME_WS_URL=ws://localhost:8765/v1/realtime" in env_text
+    stored = read_settings(tmp_path)
+    assert stored.hf_connection_mode == "local"
+    assert stored.hf_ws_url == "ws://localhost:8765/v1/realtime"
+
+
+def test_hf_target_saved_in_ui_survives_stale_settings_and_later_env_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A UI save replaces a stale stored HF target, and later `.env` writes do not revert it."""
+    update_settings(tmp_path, AppSettings(hf_connection_mode="local", hf_ws_url="ws://old-host:8765/v1/realtime"))
+    (tmp_path / ".env").write_text("HF_REALTIME_WS_URL=ws://env-host:8765/v1/realtime\n", encoding="utf-8")
+    monkeypatch.setenv("HF_REALTIME_WS_URL", "ws://env-host:8765/v1/realtime")
+    app = FastAPI()
+    stream = LocalStream(MagicMock(), _rpc_robot(), settings_app=app, instance_path=str(tmp_path))
+    stream._init_settings_ui_if_needed()
+
+    params = {"backend": "huggingface", "hf_mode": "local", "hf_host": "new-host", "hf_port": 8765}
+    _rpc_call(app, "backend.config", params)
+    stream._persist_env_values({"OBSIDIAN_SYNC_VAULT": "Demo"})
+
+    assert read_settings(tmp_path).hf_ws_url == "ws://new-host:8765/v1/realtime"
+    assert config.HF_REALTIME_WS_URL == "ws://new-host:8765/v1/realtime"
+    assert dotenv_values(tmp_path / ".env")["BACKEND_PROVIDER"] == "huggingface"
 
 
 def test_backend_config_persists_deployed_mode_without_clearing_local_hf_ws_url(
@@ -375,8 +388,8 @@ def test_backend_config_persists_deployed_mode_without_clearing_local_hf_ws_url(
     assert data["has_hf_ws_url"] is True
     assert data["hf_connection_mode"] == "deployed"
 
+    assert read_settings(tmp_path).hf_connection_mode == "deployed"
     env_text = env_path.read_text(encoding="utf-8")
-    assert "HF_REALTIME_CONNECTION_MODE=deployed" in env_text
     assert "HF_REALTIME_SESSION_URL=" not in env_text
     assert "HF_REALTIME_WS_URL=ws://localhost:8765/v1/realtime" in env_text
 
@@ -577,6 +590,8 @@ def test_detector_fallback_processes_prelaunch_restart(monkeypatch: pytest.Monke
     monkeypatch.setattr("reachy_mini_conversation_app.console.has_hf_realtime_target", lambda: True)
 
     class FakeHandler:
+        set_vad_observer = MagicMock()
+
         def __init__(self) -> None:
             self.output_queue: asyncio.Queue[Any] = asyncio.Queue()
             self.deps = SimpleNamespace(vault_session=VaultSession())
@@ -639,6 +654,70 @@ def test_detector_fallback_processes_prelaunch_restart(monkeypatch: pytest.Monke
     assert stream.handler is handlers[1]
 
 
+def test_launch_reads_microphone_while_audio_is_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The microphone is drained during audio configuration, so no backlog builds up before live input."""
+    monkeypatch.setattr(console_mod, "has_hf_realtime_target", lambda: True)
+    configuring = threading.Event()
+    read_while_configuring = threading.Event()
+
+    def read_microphone() -> None:
+        if configuring.is_set():
+            read_while_configuring.set()
+
+    def configure_audio(*_args: object, **_kwargs: object) -> None:
+        configuring.set()
+        read_while_configuring.wait(1)
+        stream.close()
+
+    media = SimpleNamespace(
+        audio=None,
+        backend=None,
+        start_recording=MagicMock(),
+        start_playing=MagicMock(),
+        stop_recording=MagicMock(),
+        stop_playing=MagicMock(),
+        get_input_audio_samplerate=MagicMock(return_value=16000),
+        get_audio_sample=read_microphone,
+    )
+    stream = LocalStream(MagicMock(shutdown=AsyncMock()), SimpleNamespace(media=media))
+    monkeypatch.setattr(stream, "_run_handler_startup_loop", AsyncMock())
+    monkeypatch.setattr(console_mod, "apply_audio_startup_config", configure_audio)
+    try:
+        stream.launch()
+    finally:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
+    assert read_while_configuring.is_set()
+
+
+@pytest.mark.asyncio
+async def test_record_loop_discards_warmup_audio() -> None:
+    """Frames read while the audio board warms up never reach the handler."""
+    warmup_frame = np.full(4, 1, dtype=np.int16)
+    live_frame = np.full(4, 2, dtype=np.int16)
+    reads: list[bool] = []
+    handler = MagicMock()
+    handler.SAMPLE_RATE = 16000
+    robot = _audio_robot(get_input_audio_samplerate=MagicMock(return_value=16000), get_audio_sample=MagicMock())
+    stream = LocalStream(handler, robot)
+    stream._audio_warming_up = True
+
+    def read_microphone() -> np.ndarray:
+        reads.append(stream._audio_warming_up)
+        return warmup_frame if stream._audio_warming_up else live_frame
+
+    robot.media.get_audio_sample.side_effect = read_microphone
+    handler.receive = AsyncMock(side_effect=lambda _frame: stream._stop_event.set())
+    recording = asyncio.create_task(stream.record_loop())
+    while len(reads) < 2 and not recording.done():
+        await asyncio.sleep(0)
+    stream._audio_warming_up = False
+    await asyncio.wait_for(recording, timeout=2)
+
+    handler.receive.assert_awaited_once()
+    np.testing.assert_array_equal(handler.receive.await_args.args[0][1], live_frame)
+
+
 @pytest.mark.asyncio
 async def test_startup_loop_rebuilds_handler_on_restart_request(monkeypatch: pytest.MonkeyPatch) -> None:
     """LocalStream should shut down and rebuild the handler when a restart is requested."""
@@ -647,6 +726,8 @@ async def test_startup_loop_rebuilds_handler_on_restart_request(monkeypatch: pyt
     monkeypatch.setattr(config, "HF_REALTIME_WS_URL", "ws://127.0.0.1:8765/v1/realtime")
 
     class FakeHandler:
+        set_vad_observer = MagicMock()
+
         def __init__(self, voice: str | None) -> None:
             self.voice = voice
             self.connection = None
@@ -968,21 +1049,6 @@ def _bare_stream() -> LocalStream:
     return LocalStream(MagicMock(), robot)
 
 
-def test_read_env_lines_prefers_existing_file(tmp_path: Path) -> None:
-    """An existing .env is read verbatim, ignoring the template."""
-    env_path = tmp_path / ".env"
-    env_path.write_text("A=1\nB=2\n", encoding="utf-8")
-
-    assert _bare_stream()._read_env_lines(env_path) == ["A=1", "B=2"]
-
-
-def test_read_env_lines_falls_back_to_example_template(tmp_path: Path) -> None:
-    """When no .env exists, the sibling .env.example is used as the template."""
-    (tmp_path / ".env.example").write_text("OPENAI_API_KEY=\n", encoding="utf-8")
-
-    assert _bare_stream()._read_env_lines(tmp_path / ".env") == ["OPENAI_API_KEY="]
-
-
 def test_seconds_since_activity_reads_handler() -> None:
     """seconds_since_activity is measured from the handler's last activity time."""
     stream = _bare_stream()
@@ -1032,14 +1098,17 @@ def _stop_after(stream: LocalStream, value: Any) -> Callable[[], Any]:
 async def test_record_loop_forwards_unmuted_frames() -> None:
     """A recorded frame is forwarded to the handler with the input sample rate."""
     frame = np.zeros(4, dtype=np.int16)
-    robot = _audio_robot(get_input_audio_samplerate=MagicMock(return_value=16000), get_audio_sample=MagicMock())
+    recorded = [frame]
+    robot = _audio_robot(
+        get_input_audio_samplerate=MagicMock(return_value=16000),
+        get_audio_sample=lambda: recorded.pop() if recorded else None,
+    )
     handler = MagicMock()
     handler.SAMPLE_RATE = 16000
-    handler.receive = AsyncMock()
     stream = LocalStream(handler, robot)
-    robot.media.get_audio_sample.side_effect = _stop_after(stream, frame)
+    handler.receive = AsyncMock(side_effect=lambda _frame: stream._stop_event.set())
 
-    await stream.record_loop()
+    await asyncio.wait_for(stream.record_loop(), timeout=2)
 
     handler.receive.assert_awaited_once_with((16000, frame))
 
@@ -1051,12 +1120,12 @@ async def test_record_loop_opens_wake_gate_before_forwarding_audio() -> None:
     robot = _audio_robot(get_input_audio_samplerate=MagicMock(return_value=16000), get_audio_sample=MagicMock())
     handler = MagicMock()
     handler.SAMPLE_RATE = 16000
-    handler.receive = AsyncMock()
+    handler.receive = AsyncMock(side_effect=lambda _frame: stream._stop_event.set())
     detector = MagicMock()
     detector.process.return_value = WakeWordEvent(model="hey_emma", score=0.9)
     on_wake_word = MagicMock()
     stream = LocalStream(handler, robot, wake_word_detector=detector, on_wake_word=on_wake_word)
-    robot.media.get_audio_sample.side_effect = _stop_after(stream, frame)
+    robot.media.get_audio_sample.return_value = frame
 
     await stream.record_loop()
 
@@ -1238,6 +1307,195 @@ async def test_exhausted_quota_sleeps_until_each_wake_word(tmp_path: Path, monke
 
 
 @pytest.mark.asyncio
+async def test_warmup_audio_never_reaches_the_wake_detector() -> None:
+    """Frames read during audio warmup are dropped before wake-word detection."""
+    warmup_frame = np.full(1280, 1, dtype=np.int16)
+    live_frame = np.full(1280, 2, dtype=np.int16)
+    detected: list[np.ndarray] = []
+    handler = MagicMock()
+    handler.receive = AsyncMock()
+    detector = MagicMock()
+    robot = _audio_robot(get_input_audio_samplerate=MagicMock(return_value=16000), get_audio_sample=MagicMock())
+    stream = LocalStream(handler, robot, wake_word_detector=detector)
+    stream._audio_warming_up = True
+    reads: list[bool] = []
+
+    def read_microphone() -> np.ndarray:
+        reads.append(stream._audio_warming_up)
+        return warmup_frame if stream._audio_warming_up else live_frame
+
+    def detect(audio: np.ndarray) -> None:
+        detected.append(audio)
+        stream._stop_event.set()
+
+    robot.media.get_audio_sample.side_effect = read_microphone
+    detector.process.side_effect = detect
+    recording = asyncio.create_task(stream.record_loop())
+    await _wait_until(lambda: len(reads) >= 2)
+    stream._audio_warming_up = False
+    await asyncio.wait_for(recording, timeout=2)
+
+    assert len(detected) == 1
+    np.testing.assert_array_equal(detected[0], live_frame)
+    handler.receive.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_post_warmup_audio_waits_for_the_backend_connection() -> None:
+    """Frames captured after warmup while the backend connects reach it in order once it is ready."""
+    warmup_frame = np.full(320, 1, dtype=np.int16)
+    live_frames = [np.full(320, 2, dtype=np.int16), np.full(320, 3, dtype=np.int16)]
+    handler = HuggingFaceRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
+    robot = _audio_robot(get_input_audio_samplerate=MagicMock(return_value=16000), get_audio_sample=MagicMock())
+    stream = LocalStream(handler, robot)
+    stream._audio_warming_up = True
+    reads: list[bool] = []
+    # The first read after warmup returns nothing, so a read that spans the end of warmup drops no live frame.
+    pending = iter([None, *live_frames])
+
+    def read_microphone() -> np.ndarray | None:
+        reads.append(stream._audio_warming_up)
+        return warmup_frame if stream._audio_warming_up else next(pending, None)
+
+    appended: list[str] = []
+
+    async def append(audio: str) -> None:
+        appended.append(audio)
+        if len(appended) == len(live_frames):
+            stream._stop_event.set()
+
+    robot.media.get_audio_sample.side_effect = read_microphone
+    recording = asyncio.create_task(stream.record_loop())
+    await _wait_until(lambda: len(reads) >= 2)
+    stream._audio_warming_up = False
+    await _wait_until(lambda: sum(not warming_up for warming_up in reads) > len(live_frames) + 1)
+    assert appended == []
+
+    handler.connection = SimpleNamespace(input_audio_buffer=SimpleNamespace(append=append))
+    handler._connected_event.set()
+    await asyncio.wait_for(recording, timeout=2)
+
+    assert appended == [base64.b64encode(frame.tobytes()).decode("utf-8") for frame in live_frames]
+
+
+@pytest.mark.asyncio
+async def test_audio_queued_during_an_outage_keeps_only_the_newest_frames(monkeypatch: pytest.MonkeyPatch) -> None:
+    """While the backend is disconnected, queued microphone audio stays bounded and keeps the newest frames in order."""
+    monkeypatch.setattr(console_mod, "MICROPHONE_QUEUE_FRAMES", 3)
+    live_frames = [np.full(320, value, dtype=np.int16) for value in range(10)]
+    handler = HuggingFaceRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
+    pending = iter(live_frames)
+    reads: list[int] = []
+    first_frame_waiting = threading.Event()
+    receive_until_connected = handler.receive
+
+    async def receive(frame: tuple[int, np.ndarray]) -> None:
+        first_frame_waiting.set()
+        await receive_until_connected(frame)
+
+    handler.receive = receive  # type: ignore[method-assign]
+
+    def read_microphone() -> np.ndarray | None:
+        # Hold later reads until the first frame waits in receive(), so the queue alone decides what is kept.
+        if reads:
+            assert first_frame_waiting.wait(timeout=2)
+        reads.append(len(reads))
+        return next(pending, None)
+
+    robot = _audio_robot(
+        get_input_audio_samplerate=MagicMock(return_value=16000),
+        get_audio_sample=MagicMock(side_effect=read_microphone),
+    )
+    stream = LocalStream(handler, robot)
+    # The first frame is already inside receive(), waiting for the connection; the queue holds the newest 3.
+    expected = [live_frames[0], *live_frames[-3:]]
+    appended: list[str] = []
+
+    async def append(audio: str) -> None:
+        appended.append(audio)
+        if len(appended) == len(expected):
+            stream._stop_event.set()
+
+    recording = asyncio.create_task(stream.record_loop())
+    await _wait_until(lambda: len(reads) > len(live_frames) + 1)
+    await asyncio.sleep(0.05)  # let the loop run every queued enqueue callback
+    assert appended == []
+
+    handler.connection = SimpleNamespace(input_audio_buffer=SimpleNamespace(append=append))
+    handler._connected_event.set()
+    await asyncio.wait_for(recording, timeout=2)
+
+    assert appended == [base64.b64encode(frame.tobytes()).decode("utf-8") for frame in expected]
+
+
+@pytest.mark.asyncio
+async def test_local_vad_stays_idle_while_the_wake_gate_is_closed() -> None:
+    """A sleeping robot runs only wake detection: local VAD cannot move it or duck playback."""
+    movement_manager = MagicMock()
+    handler = HuggingFaceRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=movement_manager))
+    handler.connection = AsyncMock()
+    handler._local_vad = MagicMock()
+    handler._local_vad.process.return_value = True
+    handler._local_vad.barge_in_candidate = True
+    detector = MagicMock()
+    robot = _audio_robot(
+        get_input_audio_samplerate=MagicMock(return_value=16000),
+        get_audio_sample=MagicMock(return_value=np.ones(1280, dtype=np.int16)),
+    )
+    stream = LocalStream(handler, robot, wake_word_detector=detector)
+
+    def detect(_audio: np.ndarray) -> None:
+        if detector.process.call_count == 3:
+            stream._stop_event.set()
+
+    detector.process.side_effect = detect
+    await asyncio.wait_for(stream.record_loop(), timeout=2)
+
+    assert detector.process.call_count == 3
+    handler._local_vad.process.assert_not_called()
+    movement_manager.set_listening.assert_not_called()
+    assert handler.playback_gain == 1.0
+
+
+@pytest.mark.asyncio
+async def test_conversation_history_replays_openai_transcripts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Talk view history holds OpenAI transcripts; a response without latency metadata adds no latency event."""
+    monkeypatch.setattr(realtime_mod, "get_session_instructions", lambda _instance_path=None: "test")
+    monkeypatch.setattr(realtime_mod, "get_session_voice", lambda default="": default)
+    monkeypatch.setattr(realtime_mod, "get_tool_specs", lambda: [])
+    monkeypatch.setattr(realtime_mod, "get_session_greeting_prompt", lambda: "")
+    handler = OpenAIRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
+    monkeypatch.setattr(type(handler.tool_manager), "start_up", MagicMock())
+    monkeypatch.setattr(type(handler.tool_manager), "shutdown", AsyncMock())
+    events = [
+        SimpleNamespace(type="conversation.item.input_audio_transcription.completed", transcript="Hello Emma"),
+        SimpleNamespace(type="response.output_audio_transcript.done", transcript="Hi there", response_id="r1"),
+        SimpleNamespace(type="response.done", response=SimpleNamespace(id="r1", metadata=None)),
+    ]
+
+    async def event_stream() -> Any:
+        for event in events:
+            yield event
+
+    connection = MagicMock()
+    connection.session.update = AsyncMock()
+    connection.__aiter__.side_effect = event_stream
+    handler.client = MagicMock()
+    handler.client.realtime.connect.return_value.__aenter__.return_value = connection
+    app = FastAPI()
+    stream = LocalStream(handler, _rpc_robot(), settings_app=app)
+    stream._init_settings_ui_if_needed()
+
+    await handler._run_realtime_session()
+    history = _rpc_call(app, "conversation.history")["result"]["events"]
+
+    assert [(event["method"], event["params"]["role"], event["params"]["text"]) for event in history] == [
+        ("conversation.transcript", "user", "Hello Emma"),
+        ("conversation.transcript", "assistant", "Hi there"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_wake_waits_for_rebuilt_handler_before_opening_gate() -> None:
     """Post-sleep audio cannot target the handler that was shut down."""
     original_handler = MagicMock()
@@ -1300,9 +1558,9 @@ async def test_record_loop_resamples_openai_input_to_24khz() -> None:
     robot = _audio_robot(get_input_audio_samplerate=MagicMock(return_value=16000), get_audio_sample=MagicMock())
     handler = MagicMock()
     handler.SAMPLE_RATE = 24000
-    handler.receive = AsyncMock()
+    handler.receive = AsyncMock(side_effect=lambda _frame: stream._stop_event.set())
     stream = LocalStream(handler, robot)
-    robot.media.get_audio_sample.side_effect = _stop_after(stream, frame)
+    robot.media.get_audio_sample.return_value = frame
 
     await stream.record_loop()
 
@@ -1324,19 +1582,19 @@ async def test_record_loop_preserves_resampler_state_across_chunks() -> None:
         )
         handler = MagicMock()
         handler.SAMPLE_RATE = 24000
-        handler.receive = AsyncMock()
         stream = LocalStream(handler, robot)
-        remaining = iter(chunks)
+        received: list[NDArray[np.float32]] = []
 
-        def next_chunk() -> NDArray[np.float32]:
-            chunk = next(remaining)
-            if chunk is chunks[-1]:
+        async def receive(frame: tuple[int, NDArray[np.float32]]) -> None:
+            received.append(frame[1])
+            if len(received) == len(chunks):
                 stream._stop_event.set()
-            return chunk
 
-        robot.media.get_audio_sample.side_effect = next_chunk
+        handler.receive = receive
+        remaining = iter(chunks)
+        robot.media.get_audio_sample.side_effect = lambda: next(remaining, None)
         await stream.record_loop()
-        return np.concatenate([call.args[0][1] for call in handler.receive.await_args_list])
+        return np.concatenate(received)
 
     whole = await resample([source])
     chunked = await resample([source[:137], source[137:348], source[348:]])
@@ -1392,7 +1650,10 @@ async def test_play_loop_pushes_mono_audio_as_float32() -> None:
     """A mono int16 frame is pushed to the speaker as float32."""
     robot = _audio_robot(push_audio_sample=MagicMock())
     handler = MagicMock()
+    handler.playback_ready = asyncio.Event()
+    handler.playback_ready.set()
     stream = LocalStream(handler, robot)
+    handler.playback_frame_epochs = {}
     handler.emit = AsyncMock(side_effect=_stop_after(stream, (16000, np.zeros(4, dtype=np.int16))))
 
     await stream.play_loop()
@@ -1429,8 +1690,11 @@ async def test_play_loop_downmixes_stereo_before_pushing() -> None:
     """A stereo frame is reduced to a single mono channel before playback."""
     robot = _audio_robot(push_audio_sample=MagicMock())
     handler = MagicMock()
+    handler.playback_ready = asyncio.Event()
+    handler.playback_ready.set()
     stream = LocalStream(handler, robot)
     stereo = np.zeros((4, 2), dtype=np.int16)
+    handler.playback_frame_epochs = {}
     handler.emit = AsyncMock(side_effect=_stop_after(stream, (16000, stereo)))
 
     await stream.play_loop()
@@ -1447,6 +1711,9 @@ async def test_play_loop_resamples_openai_output_to_sdk_rate() -> None:
         push_audio_sample=MagicMock(),
     )
     handler = MagicMock()
+    handler.playback_frame_epochs = {}
+    handler.playback_ready = asyncio.Event()
+    handler.playback_ready.set()
     stream = LocalStream(handler, robot)
     output = np.full(240, 32767, dtype=np.int16)
     handler.emit = AsyncMock(side_effect=_stop_after(stream, (24000, output)))
@@ -1470,6 +1737,9 @@ async def test_play_loop_preserves_resampler_state_across_chunks() -> None:
             push_audio_sample=lambda frame: pushed.append(frame),
         )
         handler = MagicMock()
+        handler.playback_frame_epochs = {}
+        handler.playback_ready = asyncio.Event()
+        handler.playback_ready.set()
         stream = LocalStream(handler, robot)
         remaining = iter(chunks)
 
@@ -1498,6 +1768,9 @@ async def test_play_loop_resampling_attenuates_above_output_nyquist() -> None:
         push_audio_sample=MagicMock(),
     )
     handler = MagicMock()
+    handler.playback_frame_epochs = {}
+    handler.playback_ready = asyncio.Event()
+    handler.playback_ready.set()
     stream = LocalStream(handler, robot)
     handler.emit = AsyncMock(side_effect=_stop_after(stream, (24000, source)))
 
@@ -1513,6 +1786,7 @@ async def test_play_loop_skips_empty_audio() -> None:
     robot = _audio_robot(push_audio_sample=MagicMock())
     handler = MagicMock()
     stream = LocalStream(handler, robot)
+    handler.playback_frame_epochs = {}
     handler.emit = AsyncMock(side_effect=_stop_after(stream, (24000, np.array([], dtype=np.int16))))
 
     await stream.play_loop()
@@ -1536,8 +1810,8 @@ def test_close_without_running_loop_stops_media() -> None:
 def test_drain_output_queue_empties_in_place() -> None:
     """The output queue is drained without being replaced."""
     queue: asyncio.Queue[Any] = asyncio.Queue()
-    queue.put_nowait("a")
-    queue.put_nowait("b")
+    queue.put_nowait((16000, np.zeros(512, dtype=np.int16)))
+    queue.put_nowait((16000, np.zeros(512, dtype=np.int16)))
     handler = MagicMock()
     handler.output_queue = queue
     stream = LocalStream(handler, _audio_robot())
@@ -1559,7 +1833,7 @@ def test_drain_output_queue_tolerates_missing_queue() -> None:
 
 def _rpc_robot() -> SimpleNamespace:
     """Return a robot mock whose audio pipeline supports clear_audio_queue()."""
-    audio = SimpleNamespace(clear_player=MagicMock(), clear_output_buffer=MagicMock())
+    audio = SimpleNamespace(clear_player=MagicMock())
     return SimpleNamespace(media=SimpleNamespace(audio=audio))
 
 
@@ -1582,10 +1856,11 @@ def test_rpc_status_and_mic_over_websocket() -> None:
 
 
 def test_rpc_interrupt_broadcasts_turn_listening() -> None:
-    """conversation.interrupt clears playback and pushes a turn:listening event."""
+    """conversation.interrupt cancels the response and pushes a turn:listening event."""
     handler = MagicMock()
     handler.output_queue = asyncio.Queue()
     handler._is_connected.return_value = True
+    handler.interrupt = AsyncMock()
     app = FastAPI()
     stream = LocalStream(handler, _rpc_robot(), settings_app=app)
     stream._init_settings_ui_if_needed()
@@ -1596,6 +1871,7 @@ def test_rpc_interrupt_broadcasts_turn_listening() -> None:
     notes = [m for m in msgs if m.get("method") == "conversation.turn"]
     assert results and results[0]["result"] == {"ok": True}
     assert notes and notes[0]["params"] == {"state": "listening", "reason": "interrupted"}
+    handler.interrupt.assert_awaited_once()
 
 
 def test_rpc_say_requires_active_session() -> None:
@@ -1620,7 +1896,60 @@ def test_rpc_transcript_notification_broadcast() -> None:
         stream._dispatch_transcript("assistant", "hello there", True)
         msg = ws.receive_json()
     assert msg["method"] == "conversation.transcript"
+    assert isinstance(msg["params"].pop("seq"), int)
     assert msg["params"] == {"role": "assistant", "text": "hello there", "final": True}
+
+
+def test_rpc_latency_notification_broadcast() -> None:
+    """The handler's latency observer pushes conversation.latency events."""
+    handler = MagicMock()
+    app = FastAPI()
+    stream = LocalStream(handler, _rpc_robot(), settings_app=app)
+    stream._init_settings_ui_if_needed()
+    latency_observer = handler.set_latency_observer.call_args.args[0]
+    latency: dict[str, int | str | None] = {
+        "stt_ms": 210,
+        "llm_ms": 480,
+        "tts_ttfa_ms": 100,
+        "e2e_ms": None,
+        "status": "completed",
+    }
+    with TestClient(app).websocket_connect("/rpc") as ws:
+        latency_observer(latency)
+        msg = ws.receive_json()
+    assert msg["method"] == "conversation.latency"
+    assert isinstance(msg["params"].pop("seq"), int)
+    assert msg["params"] == latency
+
+
+def test_rpc_conversation_history_replays_final_events() -> None:
+    """conversation.history returns this run's final transcripts and latencies in order, without partials."""
+    handler = MagicMock()
+    app = FastAPI()
+    stream = LocalStream(handler, _rpc_robot(), settings_app=app)
+    stream._init_settings_ui_if_needed()
+    transcript_observer = handler.set_transcript_observer.call_args.args[0]
+    latency_observer = handler.set_latency_observer.call_args.args[0]
+    # Emitted before any page connects, like the startup greeting.
+    transcript_observer("assistant", "Hi, I'm Reachy!", True)
+    transcript_observer("user", "Hel", False)
+    transcript_observer("user", "Hello", True)
+    latency_observer({"e2e_ms": 900, "status": "completed"})
+
+    with TestClient(app).websocket_connect("/rpc") as ws:
+        ws.send_json({"jsonrpc": "2.0", "id": "1", "method": "conversation.history"})
+        events = ws.receive_json()["result"]["events"]
+
+    seqs = [event["params"].pop("seq") for event in events]
+    assert seqs == sorted(set(seqs))
+    assert events == [
+        {
+            "method": "conversation.transcript",
+            "params": {"role": "assistant", "text": "Hi, I'm Reachy!", "final": True},
+        },
+        {"method": "conversation.transcript", "params": {"role": "user", "text": "Hello", "final": True}},
+        {"method": "conversation.latency", "params": {"e2e_ms": 900, "status": "completed"}},
+    ]
 
 
 def test_rpc_settings_methods() -> None:
@@ -1907,3 +2236,317 @@ def test_obsidian_vault_change_stops_the_backend_then_ends_the_session_in_the_ol
         *("hold", "stop", "end in Demo", "release in Shared", *rebuild),
     ]
     assert config.OBSIDIAN_SYNC_VAULT == "Shared"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("confirm", [False, True])
+async def test_paced_playback_changes_gain_and_preserves_or_discards_remaining_audio(confirm: bool) -> None:
+    """Ducking is reversible; clearing invalidates a partially submitted frame."""
+    handler = MagicMock()
+    handler.paced_playback = True
+    handler.playback_pending_frames = 1
+    handler.playback_epoch = 0
+    handler.playback_frame_epochs = {}
+    handler.playback_gain = 1.0
+    handler.playback_ready = asyncio.Event()
+    handler.playback_ready.set()
+    handler.output_queue = asyncio.Queue()
+    frame = np.full(960, 16384, dtype=np.int16)
+    handler.emit = AsyncMock(return_value=(16000, frame))
+    pushed: list[np.ndarray] = []
+    second_chunk = asyncio.Event()
+    robot = _audio_robot()
+    robot.media.audio = SimpleNamespace(clear_player=MagicMock())
+    stream = LocalStream(handler, robot)
+
+    def push(chunk: np.ndarray) -> None:
+        pushed.append(chunk.copy())
+        if len(pushed) == 1:
+            handler.playback_gain = 0.25
+        elif len(pushed) == 2:
+            handler.playback_gain = 1.0
+            if confirm:
+                handler.playback_ready.clear()
+            second_chunk.set()
+        else:
+            stream._stop_event.set()
+
+    robot.media.push_audio_sample = push
+
+    playback = asyncio.create_task(stream.play_loop())
+    await asyncio.wait_for(second_chunk.wait(), timeout=1)
+    if confirm:
+        await stream.clear_audio_queue()
+        stream._stop_event.set()
+    await asyncio.wait_for(playback, timeout=1)
+    assert [chunk.size for chunk in pushed] == ([320, 320] if confirm else [320, 320, 320])
+    np.testing.assert_array_equal(pushed[0], 0.5)
+    np.testing.assert_array_equal(pushed[1], 0.125)
+    if not confirm:
+        np.testing.assert_array_equal(pushed[2], 0.5)
+
+
+@pytest.mark.asyncio
+async def test_clear_audio_queue_keeps_transcripts_and_does_not_block_event_loop() -> None:
+    """A slow SDK flush does not erase metadata or stall microphone/event processing."""
+    handler = MagicMock()
+    handler.output_queue = asyncio.Queue()
+    transcript = AdditionalOutputs({"role": "user", "content": "hello"})
+    handler.output_queue.put_nowait(transcript)
+    handler.output_queue.put_nowait((16000, np.zeros(512, dtype=np.int16)))
+    flush_started = threading.Event()
+    release_flush = threading.Event()
+
+    def flush() -> None:
+        flush_started.set()
+        assert release_flush.wait(timeout=2)
+
+    stream = LocalStream(handler, SimpleNamespace(media=SimpleNamespace(audio=SimpleNamespace(clear_player=flush))))
+    clearing = asyncio.create_task(stream.clear_audio_queue())
+    try:
+        await _wait_until(flush_started.is_set)
+        assert not clearing.done()
+        assert handler.output_queue.get_nowait() is transcript
+        assert handler.output_queue.empty()
+    finally:
+        release_flush.set()
+        await clearing
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stale", [False, True])
+async def test_playback_waiting_during_flush_keeps_only_current_frames(stale: bool) -> None:
+    """A flush during emit must reject old audio without dropping the next response's first frame."""
+    handler = MagicMock()
+    handler.paced_playback = False
+    handler.playback_epoch = 0
+    handler.playback_frame_epochs = {}
+    handler.playback_ready = asyncio.Event()
+    handler.output_queue = asyncio.Queue()
+    frame = np.ones(320, dtype=np.int16)
+    waiting = asyncio.Event()
+    release = asyncio.Event()
+    robot = _audio_robot(push_audio_sample=MagicMock())
+    stream = LocalStream(handler, robot)
+
+    async def emit() -> tuple[int, np.ndarray]:
+        waiting.set()
+        await release.wait()
+        handler.playback_frame_epochs[id(frame)] = 0 if stale else handler.playback_epoch
+        stream._stop_event.set()
+        return 16000, frame
+
+    handler.emit = emit
+    playback = asyncio.create_task(stream.play_loop())
+    await asyncio.wait_for(waiting.wait(), timeout=1)
+    await stream.clear_audio_queue()
+    release.set()
+    await asyncio.wait_for(playback, timeout=1)
+    assert robot.media.push_audio_sample.call_count == (0 if stale else 1)
+
+
+@pytest.mark.asyncio
+async def test_unpaced_playback_waits_for_flush_to_finish() -> None:
+    """Without pacing, a frame of the new epoch is not pushed while the SDK flush is running."""
+    flushing = threading.Event()
+    release = threading.Event()
+
+    def clear_player() -> None:
+        flushing.set()
+        assert release.wait(timeout=2)
+
+    pushed: list[np.ndarray] = []
+    robot = _audio_robot(push_audio_sample=pushed.append)
+    robot.media.audio = SimpleNamespace(clear_player=clear_player)
+    handler = MagicMock()
+    handler.paced_playback = False
+    handler.playback_epoch = 0
+    handler.playback_frame_epochs = {}
+    handler.playback_ready = asyncio.Event()
+    handler.playback_ready.set()
+    handler.output_queue = asyncio.Queue()
+    stream = LocalStream(handler, robot)
+    flush = asyncio.create_task(stream.clear_audio_queue())
+    assert await asyncio.to_thread(flushing.wait, 1)
+
+    async def emit() -> tuple[int, np.ndarray]:
+        stream._stop_event.set()
+        return 16000, np.ones(320, dtype=np.int16)
+
+    handler.emit = emit
+    playback = asyncio.create_task(stream.play_loop())
+    await asyncio.sleep(0.05)
+    assert not pushed
+    release.set()
+    await asyncio.wait_for(asyncio.gather(flush, playback), timeout=2)
+    assert len(pushed) == 1
+
+
+@pytest.mark.asyncio
+async def test_paced_playback_keeps_one_schedule_across_frames(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A slow emit between frames is absorbed by the lead instead of pushing later chunks past their slot."""
+    clock = [100.0]
+
+    async def fake_sleep(delay: float) -> None:
+        clock[0] += max(0.0, delay)
+
+    monkeypatch.setattr(console_mod, "time", SimpleNamespace(monotonic=lambda: clock[0], time=lambda: 123.0))
+    monkeypatch.setattr(console_mod.asyncio, "sleep", fake_sleep)
+    handler = MagicMock()
+    handler.paced_playback = True
+    handler.playback_pending_frames = 2
+    handler.playback_epoch = 0
+    handler.playback_frame_epochs = {}
+    handler.playback_gain = 1.0
+    handler.playback_ready = asyncio.Event()
+    handler.playback_ready.set()
+    frames = [(16000, np.ones(3200, dtype=np.int16)) for _ in range(2)]
+    push_times: list[float] = []
+    robot = _audio_robot(push_audio_sample=lambda _chunk: push_times.append(clock[0]))
+    stream = LocalStream(handler, robot)
+
+    async def emit() -> tuple[int, np.ndarray]:
+        if not frames:
+            stream._stop_event.set()
+            return 16000, np.zeros(0, dtype=np.int16)
+        if len(frames) == 1:
+            clock[0] += 0.05  # slow delta between the two frames
+        return frames.pop(0)
+
+    handler.emit = emit
+    await stream.play_loop()
+
+    assert len(push_times) == 20
+    assert all(pushed <= 100.0 + 0.02 * slot for slot, pushed in enumerate(push_times))
+    assert stream._playback_clock == pytest.approx(100.4)
+
+
+@pytest.mark.asyncio
+async def test_paced_playback_continues_while_microphone_read_blocks() -> None:
+    """Waiting for the next SDK microphone buffer cannot stall scheduled playback chunks."""
+    handler = MagicMock()
+    handler.paced_playback = True
+    handler.playback_pending_frames = 1
+    handler.playback_epoch = 0
+    handler.playback_frame_epochs = {}
+    handler.playback_gain = 1.0
+    handler.playback_ready = asyncio.Event()
+    handler.playback_ready.set()
+    handler.receive = AsyncMock()
+    handler.emit = AsyncMock(return_value=(16000, np.ones(960, dtype=np.int16)))
+    read_started = threading.Event()
+    release_read = threading.Event()
+
+    def read_microphone() -> None:
+        read_started.set()
+        assert release_read.wait(timeout=2)
+
+    pushed: list[np.ndarray] = []
+    robot = _audio_robot(get_input_audio_samplerate=lambda: 16000, get_audio_sample=read_microphone)
+    stream = LocalStream(handler, robot)
+
+    def push(chunk: np.ndarray) -> None:
+        pushed.append(chunk)
+        if len(pushed) == 3:
+            stream._stop_event.set()
+
+    robot.media.push_audio_sample = push
+    recording = asyncio.create_task(stream.record_loop())
+    playback: asyncio.Task[None] | None = None
+    try:
+        await _wait_until(read_started.is_set)
+        playback = asyncio.create_task(stream.play_loop())
+        await asyncio.wait_for(playback, timeout=1)
+        assert not recording.done()
+        assert [chunk.size for chunk in pushed] == [320, 320, 320]
+    finally:
+        release_read.set()
+        stream._stop_event.set()
+        await recording
+        if playback is not None:
+            await playback
+
+
+def test_rpc_vad_notification_broadcast() -> None:
+    """Local VAD diagnostics reach browser clients through the handler observer."""
+    handler = MagicMock()
+    app = FastAPI()
+    stream = LocalStream(handler, _rpc_robot(), settings_app=app)
+    stream._init_settings_ui_if_needed()
+    status = {
+        "timestamp": 123.0,
+        "available": True,
+        "probability": 0.8,
+        "local_speech": True,
+        "server_speech": False,
+        "listening": True,
+        "barge_in_candidate": True,
+        "playback_gain": 0.25,
+    }
+    observer = handler.set_vad_observer.call_args.args[0]
+    with TestClient(app).websocket_connect("/rpc") as ws:
+        observer(status)
+        notification = ws.receive_json()
+    assert notification["method"] == "conversation.vad"
+    assert notification["params"] == status
+
+
+def test_unchanged_speech_setting_keeps_the_conversation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Saving the current speech switch does not reconnect the conversation."""
+    monkeypatch.setattr(config, "LOCAL_VAD_ENABLED", True)
+    app = FastAPI()
+    stream = LocalStream(
+        MagicMock(), _rpc_robot(), settings_app=app, instance_path=tmp_path, handler_factory=lambda _voice: MagicMock()
+    )
+    stream._init_settings_ui_if_needed()
+    assert _rpc_call(app, "speech.config", {"local_vad_enabled": True})["result"]["local_vad_enabled"] is True
+    assert not stream._restart_requested.is_set()
+
+
+@pytest.mark.parametrize("local_vad", [False, True])
+@pytest.mark.parametrize("barge_in", [False, True])
+def test_saved_speech_switches_reconnect_and_control_new_handler(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, local_vad: bool, barge_in: bool
+) -> None:
+    """Both saved switches reconnect the conversation, survive reload and gate barge-in on the new handler."""
+    monkeypatch.setattr(config, "LOCAL_VAD_ENABLED", not local_vad)
+    monkeypatch.setattr(config, "LOCAL_BARGE_IN_ENABLED", not barge_in)
+    app = FastAPI()
+    stream = LocalStream(
+        MagicMock(), _rpc_robot(), settings_app=app, instance_path=tmp_path, handler_factory=lambda _voice: MagicMock()
+    )
+    stream._init_settings_ui_if_needed()
+    result = _rpc_call(app, "speech.config", {"local_vad_enabled": local_vad, "local_barge_in_enabled": barge_in})[
+        "result"
+    ]
+    assert result["local_vad_enabled"] is local_vad and result["local_barge_in_enabled"] is barge_in
+    assert not result["requires_restart"]
+    assert stream._restart_requested.is_set()
+    assert _rpc_call(app, "conversation.status")["result"]["local_vad_enabled"] is local_vad
+    config.LOCAL_VAD_ENABLED = not local_vad
+    config.LOCAL_BARGE_IN_ENABLED = not barge_in
+    console_mod.load_settings_into_runtime(tmp_path)
+    assert config.LOCAL_VAD_ENABLED is local_vad
+    assert config.LOCAL_BARGE_IN_ENABLED is barge_in
+    handler = HuggingFaceRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
+    assert handler.paced_playback is (local_vad and barge_in)
+
+
+@pytest.mark.parametrize("invalid", ["false", 0, None, []])
+@pytest.mark.parametrize("field", ["local_vad_enabled", "local_barge_in_enabled"])
+def test_invalid_speech_switch_saves_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str, invalid: object
+) -> None:
+    """An invalid switch value leaves both preferences and the live configuration untouched."""
+    monkeypatch.setattr(config, "LOCAL_VAD_ENABLED", True)
+    monkeypatch.setattr(config, "LOCAL_BARGE_IN_ENABLED", True)
+    app = FastAPI()
+    stream = LocalStream(MagicMock(), _rpc_robot(), settings_app=app, instance_path=tmp_path)
+    stream._init_settings_ui_if_needed()
+    params = {"local_vad_enabled": False, "local_barge_in_enabled": False, field: invalid}
+    error = _rpc_call(app, "speech.config", params)["error"]
+    assert error["data"]["reason"] == "invalid_params"
+    assert config.LOCAL_VAD_ENABLED and config.LOCAL_BARGE_IN_ENABLED
+    assert read_settings(tmp_path).local_vad_enabled is None
+    assert read_settings(tmp_path).local_barge_in_enabled is None
+    assert not stream._restart_requested.is_set()

@@ -93,8 +93,9 @@ def test_write_refuses_system_folder_in_any_letter_case(fixture_vault: Path) -> 
     for path in ("system/New.md", "SYSTEM/Notes/New.md"):
         with pytest.raises(RefusedError, match="System"):
             _write(fixture_vault, path, {"type": "anywhere"}, folders=("*",))
-    assert not (fixture_vault / "system").exists()
-    assert not (fixture_vault / "SYSTEM").exists()
+    assert not {"system", "SYSTEM"} & {entry.name for entry in fixture_vault.iterdir()}
+    assert not (fixture_vault / "System/New.md").exists()
+    assert not (fixture_vault / "System/Notes").exists()
 
 
 def test_write_refuses_impossible_datetime_values(fixture_vault: Path) -> None:

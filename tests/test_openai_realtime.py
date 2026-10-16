@@ -217,3 +217,36 @@ async def test_openai_voice_change_reconnects_instead_of_updating_locked_session
     assert handler.get_current_voice() == "cedar"
     handler.connection.close.assert_awaited_once_with()
     handler.connection.session.update.assert_not_awaited()
+
+
+@pytest.mark.parametrize("language", ["auto", "fr"])
+def test_openai_session_omits_auto_transcription_language(monkeypatch: pytest.MonkeyPatch, language: str) -> None:
+    """OpenAI detects the language itself for `auto`; an explicit language is sent unchanged."""
+    monkeypatch.setattr(config, "REALTIME_TRANSCRIPTION_LANGUAGE", language)
+    monkeypatch.setattr(realtime_mod, "get_session_instructions", lambda _instance_path=None: "Be concise.")
+    monkeypatch.setattr(realtime_mod, "get_session_voice", lambda default=OPENAI_DEFAULT_VOICE: default)
+
+    transcription = _handler()._get_session_config([])["audio"]["input"]["transcription"]
+
+    if language == "auto":
+        assert "language" not in transcription
+    else:
+        assert transcription["language"] == language
+    assert transcription["model"] == "gpt-4o-transcribe"
+
+
+@pytest.mark.asyncio
+async def test_openai_handler_keeps_server_vad_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Local VAD and paced barge-in playback stay off for OpenAI even when enabled in config."""
+    monkeypatch.setattr(config, "LOCAL_VAD_ENABLED", True)
+    monkeypatch.setattr(config, "LOCAL_BARGE_IN_ENABLED", True)
+    load_model = MagicMock()
+    monkeypatch.setattr(realtime_mod, "SileroVAD", load_model)
+    handler = _handler()
+    monkeypatch.setattr(handler, "_build_realtime_client", AsyncMock())
+    monkeypatch.setattr(handler, "_run_realtime_session", AsyncMock())
+
+    await handler.start_up()
+
+    load_model.assert_not_called()
+    assert handler.paced_playback is False

@@ -1,4 +1,5 @@
 from openai import AsyncOpenAI
+from openai.types.realtime import RealtimeSessionCreateRequestParam
 from openai.types.realtime.realtime_audio_formats_param import AudioPCM
 
 from reachy_mini_conversation_app.config import (
@@ -6,6 +7,7 @@ from reachy_mini_conversation_app.config import (
     config,
     get_openai_realtime_model,
 )
+from reachy_mini_conversation_app.tools.core_tools import ToolSpec
 from reachy_mini_conversation_app.huggingface_realtime import OpenAICompatibleRealtimeHandler
 
 
@@ -26,6 +28,14 @@ class OpenAIRealtimeHandler(OpenAICompatibleRealtimeHandler):
     def _get_model_name(self) -> str:
         """Return the validated OpenAI Realtime model."""
         return get_openai_realtime_model()
+
+    def _get_session_config(self, tool_specs: list[ToolSpec]) -> RealtimeSessionCreateRequestParam:
+        """Return the session config, letting OpenAI detect the language when it is `auto`."""
+        session = super()._get_session_config(tool_specs)
+        if config.REALTIME_TRANSCRIPTION_LANGUAGE == "auto":
+            # OpenAI expects an ISO-639-1 code; without one it detects the language itself.
+            del session["audio"]["input"]["transcription"]["language"]
+        return session
 
     async def _build_realtime_client(self) -> AsyncOpenAI:
         """Build the direct OpenAI Realtime SDK client."""
