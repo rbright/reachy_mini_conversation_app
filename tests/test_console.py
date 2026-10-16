@@ -1379,6 +1379,56 @@ async def test_post_warmup_audio_waits_for_the_backend_connection() -> None:
 
 
 @pytest.mark.asyncio
+async def test_audio_queued_during_an_outage_keeps_only_the_newest_frames(monkeypatch: pytest.MonkeyPatch) -> None:
+    """While the backend is disconnected, queued microphone audio stays bounded and keeps the newest frames in order."""
+    monkeypatch.setattr(console_mod, "MICROPHONE_QUEUE_FRAMES", 3)
+    live_frames = [np.full(320, value, dtype=np.int16) for value in range(10)]
+    handler = HuggingFaceRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
+    pending = iter(live_frames)
+    reads: list[int] = []
+    first_frame_waiting = threading.Event()
+    receive_until_connected = handler.receive
+
+    async def receive(frame: tuple[int, np.ndarray]) -> None:
+        first_frame_waiting.set()
+        await receive_until_connected(frame)
+
+    handler.receive = receive  # type: ignore[method-assign]
+
+    def read_microphone() -> np.ndarray | None:
+        # Hold later reads until the first frame waits in receive(), so the queue alone decides what is kept.
+        if reads:
+            assert first_frame_waiting.wait(timeout=2)
+        reads.append(len(reads))
+        return next(pending, None)
+
+    robot = _audio_robot(
+        get_input_audio_samplerate=MagicMock(return_value=16000),
+        get_audio_sample=MagicMock(side_effect=read_microphone),
+    )
+    stream = LocalStream(handler, robot)
+    # The first frame is already inside receive(), waiting for the connection; the queue holds the newest 3.
+    expected = [live_frames[0], *live_frames[-3:]]
+    appended: list[str] = []
+
+    async def append(audio: str) -> None:
+        appended.append(audio)
+        if len(appended) == len(expected):
+            stream._stop_event.set()
+
+    recording = asyncio.create_task(stream.record_loop())
+    await _wait_until(lambda: len(reads) > len(live_frames) + 1)
+    await asyncio.sleep(0.05)  # let the loop run every queued enqueue callback
+    assert appended == []
+
+    handler.connection = SimpleNamespace(input_audio_buffer=SimpleNamespace(append=append))
+    handler._connected_event.set()
+    await asyncio.wait_for(recording, timeout=2)
+
+    assert appended == [base64.b64encode(frame.tobytes()).decode("utf-8") for frame in expected]
+
+
+@pytest.mark.asyncio
 async def test_local_vad_stays_idle_while_the_wake_gate_is_closed() -> None:
     """A sleeping robot runs only wake detection: local VAD cannot move it or duck playback."""
     movement_manager = MagicMock()

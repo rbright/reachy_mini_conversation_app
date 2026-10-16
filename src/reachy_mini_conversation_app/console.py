@@ -146,6 +146,8 @@ LEGACY_STARTUP_ENV_NAMES = (
 BACKEND_RETRY_DELAY_SECONDS = 5.0
 CONVERSATION_HISTORY_LIMIT = 200  # events, about 100 exchanges
 PLAYBACK_LEAD_SECONDS = 0.1  # paced chunks reach the SDK this far ahead of their slot
+# About 5 s of 20 ms SDK frames: keeps speech said while the backend connects, drops older audio during an outage.
+MICROPHONE_QUEUE_FRAMES = 250
 # Values outside this set are single-quoted in `.env` so that python-dotenv keeps `#`, spaces, and `$` literally.
 _PLAIN_ENV_VALUE = re.compile(r"[A-Za-z0-9_./:@+,=-]*")
 
@@ -1445,8 +1447,14 @@ class LocalStream:
         logger.debug("Audio recording started at %s Hz", input_sample_rate)
 
         loop = asyncio.get_running_loop()
-        frames: asyncio.Queue[AudioFrame] = asyncio.Queue()
+        frames: asyncio.Queue[AudioFrame] = asyncio.Queue(maxsize=MICROPHONE_QUEUE_FRAMES)
         stop_reading = threading.Event()
+
+        def enqueue(frame: AudioFrame) -> None:
+            # Runs on the event loop, the only consumer, so the oldest frame can be dropped without a race.
+            if frames.full():
+                frames.get_nowait()
+            frames.put_nowait(frame)
 
         def read_microphone() -> None:
             # The SDK read blocks up to 20 ms: one reader thread costs less than a thread hop per frame.
@@ -1454,7 +1462,7 @@ class LocalStream:
                 warming_up = self._audio_warming_up  # a read spanning the end of warmup still holds warmup audio
                 audio_frame = self._robot.media.get_audio_sample()
                 if audio_frame is not None and not warming_up:
-                    loop.call_soon_threadsafe(frames.put_nowait, (input_sample_rate, audio_frame))
+                    loop.call_soon_threadsafe(enqueue, (input_sample_rate, audio_frame))
 
         reader = threading.Thread(target=read_microphone, name="microphone-reader", daemon=True)
         reader.start()
