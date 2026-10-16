@@ -20,6 +20,7 @@ class RpcError extends Error {
 
 let socket = null;
 let connecting = null;
+let reconnectTimer = null; // one pending retry at most
 let rpcCounter = 0;
 const pending = new Map(); // id -> { resolve, reject, timer }
 const subscribers = new Map(); // method -> Set<cb>
@@ -47,8 +48,14 @@ function connect() {
       }
       pending.clear();
       if (!opened) reject(new RpcError("cannot reach /rpc", "disconnected"));
-      // Keep the event stream alive across drops while anyone is listening.
-      else if (subscribers.size > 0) setTimeout(() => connect().catch(() => {}), 1000);
+      // Keep the event stream alive while anyone is listening, across drops and when the
+      // page loads before the app has mounted /rpc. One retry chain at most.
+      if (subscribers.size > 0 && reconnectTimer === null) {
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = null;
+          if (subscribers.size > 0) connect().catch(() => {});
+        }, 1000);
+      }
     };
   });
   return connecting;
@@ -143,7 +150,10 @@ export function subscribe(method, cb) {
   set.add(cb);
   connect().catch(() => {});
   return () => {
-    subscribers.get(method)?.delete(cb);
+    const current = subscribers.get(method);
+    if (!current) return;
+    current.delete(cb);
+    if (current.size === 0) subscribers.delete(method);
   };
 }
 
