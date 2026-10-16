@@ -24,7 +24,8 @@ env:
 jobs:
   sync-preview:
     name: Sync preview Space
-    if: ${{ github.event.action != 'closed' && github.event.pull_request.head.repo.full_name == github.repository }}
+    # The preview Spaces live in the pollen-robotics Hugging Face namespace, which forks cannot write to.
+    if: ${{ github.repository == 'pollen-robotics/reachy_mini_conversation_app' && github.event.action != 'closed' && github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -164,7 +165,7 @@ jobs:
 
   delete-preview:
     name: Delete preview Space
-    if: ${{ github.event.action == 'closed' && github.event.pull_request.head.repo.full_name == github.repository }}
+    if: ${{ github.repository == 'pollen-robotics/reachy_mini_conversation_app' && github.event.action == 'closed' && github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
