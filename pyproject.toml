@@ -57,6 +57,9 @@ exclude-newer = "7 days"
 [tool.uv.exclude-newer-package]
 "reachy-mini" = false
 "reachy-mini-dances-library" = false
+# Trust-store fixes must not wait for the cooldown.
+"certifi" = false
+"pip" = false
 
 [project.entry-points."reachy_mini_apps"]
 reachy_mini_conversation_app = "reachy_mini_conversation_app.main:ReachyMiniConversationApp"
