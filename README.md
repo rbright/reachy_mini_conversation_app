@@ -55,7 +55,7 @@ The app connects the user, AI services, and robot hardware:
 <details open>
 <summary>Using uv (recommended)</summary>
 
-Set up with [uv](https://docs.astral.sh/uv/):
+Set up with [uv](https://docs.astral.sh/uv/) 0.13.5 or later:
 
 ```bash
 # macOS (Homebrew)

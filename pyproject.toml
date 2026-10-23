@@ -52,6 +52,8 @@ dev = [
 reachy-mini-conversation-app = "reachy_mini_conversation_app.main:main"
 
 [tool.uv]
+# uv 0.13.5 rejects the compromised eMudhra intermediates and ships fixed managed Python/pip.
+required-version = ">=0.13.5"
 exclude-newer = "7 days"
 
 [tool.uv.exclude-newer-package]
