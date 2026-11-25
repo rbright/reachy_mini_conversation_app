@@ -1,0 +1,4 @@
+scripts:
+  setup: |
+    direnv allow
+    direnv exec . just install

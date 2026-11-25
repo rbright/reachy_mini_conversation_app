@@ -111,19 +111,19 @@ Architecture overview: [`README.md`](README.md#architecture).
 
 ## Commands
 
-Set up the environment per the [README installation guide](README.md#installation). With the venv active, run the tools directly. Run the full gate before handing work back. CI runs the same checks on Linux, macOS, and Windows:
+Set up the environment per the [README installation guide](README.md#installation), then install dependencies with `just install`. Run the full gate before handing work back. `just check` runs the same checks as CI, which also runs them on Linux, macOS, and Windows.
 
-```bash
-ruff check . --fix && ruff format . && mypy --pretty --show-error-codes && pytest tests/ -v
-```
-
-| Task        | Command                              |
-|-------------|--------------------------------------|
-| Lint + fix  | `ruff check . --fix`                 |
-| Format      | `ruff format .`                      |
-| Type-check  | `mypy --pretty --show-error-codes`   |
-| Tests       | `pytest tests/ -v`                   |
-| Run the app | `reachy-mini-conversation-app`       |
+| Task              | Command                              |
+|-------------------|--------------------------------------|
+| Install deps      | `just install`                       |
+| Format            | `just fmt`                           |
+| Format check      | `just fmt-check`                     |
+| Lint              | `just lint`                          |
+| Type-check        | `just typecheck`                     |
+| Tests             | `just test`                          |
+| `uv.lock` check   | `just lock-check`                    |
+| Full gate         | `just check`                         |
+| Run the app       | `reachy-mini-conversation-app`       |
 
 If you change dependencies, keep `uv.lock` in sync by running `uv lock` (CI validates it).
 

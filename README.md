@@ -79,6 +79,21 @@ uv sync --group dev
 > Run `uv sync --frozen` to install the exact dependency set from `uv.lock` without re-resolving versions.
 
 <details>
+<summary>Development with just</summary>
+
+Development tasks run through [just](https://github.com/casey/just). Run `just` to list the recipes:
+
+```bash
+just install    # uv sync --locked --group dev
+just fmt        # format in place
+just check      # everything CI gates on: uv.lock, format, lint, mypy, pytest
+```
+
+Nix users get uv, Python 3.12, and the native build dependencies from the flake dev shell through direnv (`direnv allow`). Without Nix, install uv 0.13.5 or later and the system libraries that `pycairo` and `pygobject` build against (cairo, gobject-introspection, pkg-config).
+
+</details>
+
+<details>
 <summary>Using pip</summary>
 
 ```bash
