@@ -132,7 +132,7 @@ async def test_local_vad_failure_keeps_sending_audio_and_server_listening(
 @pytest.mark.asyncio
 async def test_receive_sends_audio_before_local_vad() -> None:
     """Server audio never waits for local inference."""
-    handler = HuggingFaceRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
+    handler = _plain_handler()
     handler.connection = AsyncMock()
     handler._local_vad = MagicMock()
     handler._local_vad.process.side_effect = lambda *_args, **_kwargs: (
@@ -148,7 +148,7 @@ async def test_unavailable_local_vad_does_not_prevent_startup(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A model load failure leaves the server conversation available."""
-    handler = HuggingFaceRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
+    handler = _plain_handler()
     monkeypatch.setattr(config, "LOCAL_VAD_ENABLED", True)
     monkeypatch.setattr(hf_mod, "SileroVAD", MagicMock(side_effect=OSError("missing model")))
     monkeypatch.setattr(handler, "_build_realtime_client", AsyncMock())
@@ -185,7 +185,7 @@ async def test_server_session_exit_clears_active_listening(monkeypatch: pytest.M
 @pytest.mark.asyncio
 async def test_local_vad_can_be_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     """Server-only configuration does not load a local model."""
-    handler = HuggingFaceRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
+    handler = _plain_handler()
     monkeypatch.setattr(config, "LOCAL_VAD_ENABLED", False)
     load_model = MagicMock()
     monkeypatch.setattr(hf_mod, "SileroVAD", load_model)
@@ -388,44 +388,31 @@ async def test_receive_stops_waiting_when_handler_shuts_down() -> None:
 @pytest.mark.asyncio
 async def test_partial_transcription_appends_incremental_deltas(monkeypatch: Any) -> None:
     """Partial transcription deltas for one item should accumulate in arrival order."""
-    monkeypatch.setattr(hf_mod, "get_session_instructions", lambda _instance_path=None: "test")
-    monkeypatch.setattr(hf_mod, "get_session_voice", lambda default=HF_DEFAULT_VOICE: "Aiden")
-    monkeypatch.setattr(hf_mod, "get_tool_specs", lambda: [])
-
-    handler = HuggingFaceRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
-    handler.client = _make_fake_realtime_client(
-        events=(
+    handler = _session_handler(
+        monkeypatch,
+        (
             _FakeEvent("conversation.item.input_audio_transcription.delta", item_id="item-1", delta="Hey how are"),
             _FakeEvent("conversation.item.input_audio_transcription.delta", item_id="item-1", delta=" you"),
-        )
+        ),
     )
-    monkeypatch.setattr(type(handler.tool_manager), "start_up", MagicMock())
-    monkeypatch.setattr(type(handler.tool_manager), "shutdown", AsyncMock())
 
     await handler._run_realtime_session()
 
     assert handler.input_transcript_chunks_by_item.item_id == "item-1"
     assert handler.input_transcript_chunks_by_item.deltas == ["Hey how are", " you"]
-    assert "".join(handler.input_transcript_chunks_by_item.deltas) == "Hey how are you"
 
 
 @pytest.mark.asyncio
 async def test_partial_transcription_resets_on_new_item_id(monkeypatch: Any) -> None:
     """A new item_id should drop fragments from the previous item."""
-    monkeypatch.setattr(hf_mod, "get_session_instructions", lambda _instance_path=None: "test")
-    monkeypatch.setattr(hf_mod, "get_session_voice", lambda default=HF_DEFAULT_VOICE: "Aiden")
-    monkeypatch.setattr(hf_mod, "get_tool_specs", lambda: [])
-
-    handler = HuggingFaceRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
-    handler.client = _make_fake_realtime_client(
-        events=(
+    handler = _session_handler(
+        monkeypatch,
+        (
             _FakeEvent("conversation.item.input_audio_transcription.delta", item_id="item-1", delta="old"),
             _FakeEvent("conversation.item.input_audio_transcription.delta", item_id="item-2", delta="new"),
             _FakeEvent("conversation.item.input_audio_transcription.delta", item_id="item-2", delta=" fragment"),
-        )
+        ),
     )
-    monkeypatch.setattr(type(handler.tool_manager), "start_up", MagicMock())
-    monkeypatch.setattr(type(handler.tool_manager), "shutdown", AsyncMock())
 
     await handler._run_realtime_session()
 
@@ -482,13 +469,8 @@ async def test_emit_skips_idle_signal_while_response_active(monkeypatch: Any) ->
 @pytest.mark.asyncio
 async def test_parallel_tool_calls_trigger_single_response(monkeypatch: Any) -> None:
     """Parallel tool calls in one turn should yield one response, not one per completed tool."""
-    monkeypatch.setattr(hf_mod, "get_session_instructions", lambda _instance_path=None: "test")
-    monkeypatch.setattr(hf_mod, "get_session_voice", lambda default=HF_DEFAULT_VOICE: "Aiden")
-    monkeypatch.setattr(hf_mod, "get_tool_specs", lambda: [])
-
-    handler = HuggingFaceRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
+    handler = _plain_handler()
     handler.connection = AsyncMock()
-    handler.output_queue = asyncio.Queue()
     monkeypatch.setattr(handler, "_wait_for_response_done_before_tool_result", AsyncMock(return_value=True))
     create = AsyncMock()
     monkeypatch.setattr(handler, "_safe_response_create", create)
@@ -511,7 +493,7 @@ async def test_parallel_tool_calls_trigger_single_response(monkeypatch: Any) -> 
     assert create.await_count == 1
 
 
-def test_handler_uses_hf_startup_voice_at_startup(monkeypatch: Any) -> None:
+def test_handler_uses_hf_startup_voice_at_startup() -> None:
     """Hugging Face startup should restore persisted HF voices."""
     handler = HuggingFaceRealtimeHandler(
         ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()),
@@ -525,7 +507,7 @@ def test_handler_ignores_unsupported_hf_profile_voice(monkeypatch: Any) -> None:
     """Unsupported profile voices should not be sent to the Hugging Face backend."""
     monkeypatch.setattr(hf_mod, "get_session_voice", lambda default=HF_DEFAULT_VOICE: "cedar")
 
-    handler = HuggingFaceRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
+    handler = _plain_handler()
 
     assert handler.get_current_voice() == HF_DEFAULT_VOICE
     session = handler._get_session_config([])
@@ -536,7 +518,7 @@ def test_handler_normalizes_hf_voice_case(monkeypatch: Any) -> None:
     """Lowercase Hugging Face speaker names should resolve to the curated UI value."""
     monkeypatch.setattr(hf_mod, "get_session_voice", lambda default=HF_DEFAULT_VOICE: "serena")
 
-    handler = HuggingFaceRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
+    handler = _plain_handler()
 
     assert handler.get_current_voice() == "Serena"
 
@@ -559,7 +541,7 @@ async def test_run_realtime_session_uses_default_voice_for_lb_allocated_sessions
     monkeypatch.setattr(config, "HF_REALTIME_SESSION_URL", "https://lb.example.test/session")
 
     captured_update: dict[str, Any] = {}
-    handler = HuggingFaceRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
+    handler = _plain_handler()
     handler.client = _make_fake_realtime_client(captured_update=captured_update)
 
     await handler._run_realtime_session()
@@ -578,7 +560,7 @@ def test_huggingface_session_uses_configured_transcription_language(
 ) -> None:
     """Hugging Face realtime sessions should forward the configured transcription language."""
     monkeypatch.setattr(config, "REALTIME_TRANSCRIPTION_LANGUAGE", language)
-    handler = HuggingFaceRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
+    handler = _plain_handler()
 
     session = handler._get_session_config([])
 
@@ -593,7 +575,7 @@ async def test_run_realtime_session_passes_allocated_session_query(monkeypatch: 
     monkeypatch.setattr(hf_mod, "get_tool_specs", lambda: [])
 
     captured_connect: dict[str, Any] = {}
-    handler = HuggingFaceRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
+    handler = _plain_handler()
     handler.client = _make_fake_realtime_client(captured_connect=captured_connect)
     handler._realtime_connect_query = {"session_token": "abc123"}
 
@@ -628,7 +610,7 @@ async def test_build_realtime_client_local_uses_explicit_hf_token_only(
         "ws://127.0.0.1:8765/v1/realtime?session_token=abc123&model=ignored-by-sdk",
     )
 
-    handler = HuggingFaceRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
+    handler = _plain_handler()
 
     client = await handler._build_realtime_client()
 
@@ -746,7 +728,7 @@ async def test_apply_personality_uses_selected_voice_for_lb_allocated_sessions(m
     class FakeConnection:
         session = FakeSession()
 
-    handler = HuggingFaceRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
+    handler = _plain_handler()
     handler.connection = FakeConnection()
     monkeypatch.setattr(handler, "_restart_session", AsyncMock(return_value=None))
 
@@ -774,7 +756,7 @@ async def test_apply_personality_restores_profile_when_tools_fail(monkeypatch: A
     monkeypatch.setattr(hf_mod, "set_custom_profile", select_profile)
     monkeypatch.setattr(hf_mod, "get_session_instructions", lambda _instance_path=None: "new instructions")
     monkeypatch.setattr(hf_mod.core_tools, "initialize_tools", fail_tool_reload)
-    handler = HuggingFaceRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
+    handler = _plain_handler()
 
     result = await handler.apply_personality("broken")
 
@@ -795,7 +777,7 @@ async def test_change_voice_updates_live_hf_session_without_restart(monkeypatch:
     class FakeConnection:
         session = FakeSession()
 
-    handler = HuggingFaceRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
+    handler = _plain_handler()
     handler.connection = FakeConnection()
     restart = AsyncMock(return_value=None)
     monkeypatch.setattr(handler, "_restart_session", restart)
@@ -1220,7 +1202,7 @@ async def test_receive_downmixes_stereo_and_forwards() -> None:
     handler.connection = SimpleNamespace(input_audio_buffer=SimpleNamespace(append=append))
     stereo = np.array([[1, 10], [2, 20], [3, 30], [4, 40]], dtype=np.int16)
     await handler.receive((16000, stereo))
-    append.assert_awaited_once()
+    append.assert_awaited_once_with(audio=base64.b64encode(stereo[:, 0].tobytes()).decode("utf-8"))
 
 
 @pytest.mark.asyncio

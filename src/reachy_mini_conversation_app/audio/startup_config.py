@@ -1,8 +1,6 @@
 """Startup configuration for the Reachy Mini audio processor."""
 
-from __future__ import annotations
 import logging
-from collections.abc import Sequence
 
 
 AudioControlValue = float | int
@@ -53,12 +51,11 @@ def apply_audio_startup_config(
         return False
 
     if applied:
-        log.info("Applied Reachy audio startup config: %s", _format_config(AUDIO_STARTUP_CONFIG))
+        log.info(
+            "Applied Reachy audio startup config: %s",
+            ", ".join(f"{name}={' '.join(str(value) for value in values)}" for name, values in AUDIO_STARTUP_CONFIG),
+        )
     else:
         log.warning("Reachy audio startup config was not applied.")
 
     return applied
-
-
-def _format_config(config: Sequence[AudioStartupParameter]) -> str:
-    return ", ".join(f"{name}={' '.join(str(value) for value in values)}" for name, values in config)

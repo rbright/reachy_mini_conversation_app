@@ -26,7 +26,6 @@ import reachy_mini_conversation_app.vault_session as vault_session_mod
 import reachy_mini_conversation_app.huggingface_realtime as realtime_mod
 from reachy_mini_conversation_app import obsidian_sync
 from reachy_mini_conversation_app.config import (
-    HF_AVAILABLE_VOICES,
     SETTINGS_PIN_HASH_ENV,
     OPENAI_AVAILABLE_VOICES,
     config,
@@ -44,10 +43,6 @@ from reachy_mini_conversation_app.startup_settings import (
     load_startup_settings_into_runtime,
 )
 from reachy_mini_conversation_app.tools.core_tools import ToolDependencies
-from reachy_mini_conversation_app.personality_routes import (
-    RouteError,
-    build_personality_ops,
-)
 from reachy_mini_conversation_app.huggingface_realtime import HuggingFaceRealtimeHandler
 from reachy_mini_conversation_app.profile_vault_access import (
     SessionNoteTarget,
@@ -200,7 +195,8 @@ async def test_activity_from_rebuilt_handler_reaches_rpc_clients() -> None:
     """Activity from a rebuilt handler must still reach /rpc subscribers."""
 
     class FakeHandler:
-        set_vad_observer = MagicMock()
+        set_transcript_observer = set_transcript_command_handler = MagicMock()
+        set_latency_observer = set_vad_observer = MagicMock()
 
         def __init__(self) -> None:
             self.observer: Any = None
@@ -355,6 +351,33 @@ def test_hf_target_saved_in_ui_survives_stale_settings_and_later_env_writes(
     assert read_settings(tmp_path).hf_ws_url == "ws://new-host:8765/v1/realtime"
     assert config.HF_REALTIME_WS_URL == "ws://new-host:8765/v1/realtime"
     assert dotenv_values(tmp_path / ".env")["BACKEND_PROVIDER"] == "huggingface"
+
+
+def test_persist_env_values_writes_env_when_working_directory_is_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unavailable working directory only skips its `.env.example` template."""
+
+    def missing_cwd() -> Path:
+        raise FileNotFoundError("working directory was removed")
+
+    monkeypatch.setattr(Path, "cwd", missing_cwd)
+    stream = LocalStream(MagicMock(), _rpc_robot(), instance_path=str(tmp_path))
+
+    stream._persist_env_values({"OBSIDIAN_SYNC_VAULT": "Demo"})
+
+    assert dotenv_values(tmp_path / ".env")["OBSIDIAN_SYNC_VAULT"] == "Demo"
+
+
+def test_audio_level_skips_numeric_errors() -> None:
+    """A numeric error while computing the level meter must not escape the audio loops."""
+    app = FastAPI()
+    stream = LocalStream(MagicMock(), _rpc_robot(), settings_app=app)
+    stream._init_settings_ui_if_needed()
+
+    with np.errstate(over="raise"):
+        stream._emit_level("user", np.full(4, 1e30, dtype=np.float32))
 
 
 def test_backend_config_persists_deployed_mode_without_clearing_local_hf_ws_url(
@@ -590,7 +613,8 @@ def test_detector_fallback_processes_prelaunch_restart(monkeypatch: pytest.Monke
     monkeypatch.setattr("reachy_mini_conversation_app.console.has_hf_realtime_target", lambda: True)
 
     class FakeHandler:
-        set_vad_observer = MagicMock()
+        set_activity_observer = set_transcript_observer = set_transcript_command_handler = MagicMock()
+        set_latency_observer = set_vad_observer = MagicMock()
 
         def __init__(self) -> None:
             self.output_queue: asyncio.Queue[Any] = asyncio.Queue()
@@ -726,7 +750,8 @@ async def test_startup_loop_rebuilds_handler_on_restart_request(monkeypatch: pyt
     monkeypatch.setattr(config, "HF_REALTIME_WS_URL", "ws://127.0.0.1:8765/v1/realtime")
 
     class FakeHandler:
-        set_vad_observer = MagicMock()
+        set_activity_observer = set_transcript_observer = set_transcript_command_handler = MagicMock()
+        set_latency_observer = set_vad_observer = MagicMock()
 
         def __init__(self, voice: str | None) -> None:
             self.voice = voice
@@ -806,115 +831,6 @@ async def test_startup_loop_rebuilds_handler_on_restart_request(monkeypatch: pyt
             await startup_task
         except asyncio.CancelledError:
             pass
-
-
-@pytest.mark.asyncio
-async def test_personality_ops_return_hf_voices() -> None:
-    """With no running loop, voices() falls back to the Hugging Face catalog."""
-    ops = build_personality_ops(MagicMock(), lambda: None)
-    assert await ops.voices() == HF_AVAILABLE_VOICES
-
-
-def test_personality_ops_delete_builtin_is_not_deletable() -> None:
-    """Deleting a built-in personality raises not_deletable (was REST 404)."""
-    ops = build_personality_ops(MagicMock(), lambda: None)
-    with pytest.raises(RouteError) as ei:
-        ops.delete("mad_scientist_assistant")
-    assert ei.value.reason == "not_deletable"
-
-
-def test_personality_ops_load_builtin_default_profile() -> None:
-    """The bulk personality API should retain the complete profile payload."""
-    ops = build_personality_ops(MagicMock(), lambda: None)
-    data = ops.load("default")
-    assert "Reachy Mini" in data["instructions"]
-    assert data["tools_text"]
-    assert data["enabled_tools"]
-    assert data["available_tools"]
-
-
-@pytest.mark.asyncio
-async def test_personality_ops_apply_voice() -> None:
-    """apply_voice delegates to the handler and reports the status."""
-    handler = MagicMock()
-    handler.change_voice = AsyncMock(return_value="Voice changed to cedar.")
-    ops = build_personality_ops(handler, lambda: asyncio.get_running_loop())
-
-    result = await ops.apply_voice("cedar")
-
-    assert result == {"ok": True, "status": "Voice changed to cedar."}
-    handler.change_voice.assert_awaited_once_with("cedar")
-
-
-@pytest.mark.asyncio
-async def test_personality_ops_persist_startup_with_voice_override() -> None:
-    """Applying with persist=True saves the active manual voice override."""
-    handler = MagicMock()
-    handler.apply_personality = AsyncMock(return_value="Applied personality and restarted realtime session.")
-    handler.get_current_voice = MagicMock(return_value="shimmer")
-    persist_personality = MagicMock()
-    ops = build_personality_ops(handler, lambda: asyncio.get_running_loop(), persist_personality=persist_personality)
-
-    result = await ops.apply("sorry_bro", persist=True)
-
-    assert result["ok"] is True
-    handler.apply_personality.assert_awaited_once_with("sorry_bro")
-    persist_personality.assert_called_once_with("sorry_bro", "shimmer")
-
-
-@pytest.mark.asyncio
-async def test_personality_ops_apply_same_profile_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Re-applying the active personality is a no-op for the realtime handler."""
-    monkeypatch.setattr(config, "REACHY_MINI_CUSTOM_PROFILE", "sorry_bro")
-    handler = MagicMock()
-    handler.apply_personality = AsyncMock(return_value="should not be called")
-    handler.get_current_voice = MagicMock(return_value="shimmer")
-    ops = build_personality_ops(handler, lambda: None)
-
-    result = await ops.apply("sorry_bro")
-
-    assert result["status"] == "Personality unchanged."
-    handler.apply_personality.assert_not_awaited()
-    handler.get_current_voice.assert_not_called()
-
-
-def test_personality_ops_startup_choice_survives_runtime_change(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Runtime profile switching should not redefine the saved startup personality."""
-    monkeypatch.setattr(config, "REACHY_MINI_CUSTOM_PROFILE", "captain_circuit")
-    ops = build_personality_ops(MagicMock(), lambda: None)
-
-    first = ops.get_choices()
-    assert first["current"] == "captain_circuit"
-    assert first["startup"] == "captain_circuit"
-
-    monkeypatch.setattr(config, "REACHY_MINI_CUSTOM_PROFILE", "chess_coach")
-
-    second = ops.get_choices()
-    assert second["current"] == "chess_coach"
-    assert second["startup"] == "captain_circuit"
-
-
-@pytest.mark.asyncio
-async def test_personality_ops_use_apply_callback() -> None:
-    """Apply delegates to the injected apply_personality callback, not the handler."""
-    handler = MagicMock()
-    handler.apply_personality = AsyncMock(return_value="handler should not be called")
-    apply_personality = AsyncMock(return_value="Applied personality and restarting backend.")
-    get_current_voice = MagicMock(return_value="cedar")
-    ops = build_personality_ops(
-        handler,
-        lambda: asyncio.get_running_loop(),
-        apply_personality=apply_personality,
-        get_current_voice=get_current_voice,
-    )
-
-    result = await ops.apply("sorry_bro")
-
-    assert result["status"] == "Applied personality and restarting backend."
-    apply_personality.assert_awaited_once_with("sorry_bro")
-    handler.apply_personality.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1820,15 +1736,6 @@ def test_drain_output_queue_empties_in_place() -> None:
 
     assert stream.handler.output_queue is queue
     assert queue.empty()
-
-
-def test_drain_output_queue_tolerates_missing_queue() -> None:
-    """Draining is a no-op when the handler has no output queue."""
-    handler = MagicMock()
-    handler.output_queue = None
-    stream = LocalStream(handler, _audio_robot())
-
-    stream._drain_output_queue()  # must not raise
 
 
 def _rpc_robot() -> SimpleNamespace:

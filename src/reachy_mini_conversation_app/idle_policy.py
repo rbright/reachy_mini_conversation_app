@@ -10,7 +10,6 @@ Profiles or sessions can disable tools. When one or more idle tools are unavaila
 remaining active candidates.
 """
 
-from __future__ import annotations
 import json
 import uuid
 import random

@@ -66,6 +66,18 @@ def _profile_param(params: dict[str, Any], *, required: bool = False) -> str | N
     return profile
 
 
+def _profile_selection(profile_name: str, known_profile_names: list[str]) -> dict[str, object]:
+    active_profile = canonical_profile_name(config.REACHY_MINI_CUSTOM_PROFILE)
+    return {
+        "profile": profile_name,
+        "is_active": profile_name == active_profile,
+        "editable": LOCKED_PROFILE is None,
+        "profiles": [
+            {"id": known_profile, "active": known_profile == active_profile} for known_profile in known_profile_names
+        ],
+    }
+
+
 def _profile_tool_payload(
     profile_name: str,
     known_profile_names: list[str],
@@ -74,16 +86,10 @@ def _profile_tool_payload(
     *,
     overridden: bool,
 ) -> dict[str, object]:
-    active_profile = canonical_profile_name(config.REACHY_MINI_CUSTOM_PROFILE)
     available_ids = {tool["id"] for tool in available_tools}
     return {
-        "profile": profile_name,
-        "is_active": profile_name == active_profile,
+        **_profile_selection(profile_name, known_profile_names),
         "overridden": overridden,
-        "editable": LOCKED_PROFILE is None,
-        "profiles": [
-            {"id": known_profile, "active": known_profile == active_profile} for known_profile in known_profile_names
-        ],
         "enabled_tools": enabled_tools,
         "available_tools": available_tools,
         "unavailable_enabled_tools": [tool_id for tool_id in enabled_tools if tool_id not in available_ids],
@@ -99,6 +105,17 @@ def register_profile_tool_methods(
 ) -> None:
     """Register per-personality tool-access methods."""
 
+    async def _apply_profile_tool_change(profile_name: str, *, changed: bool) -> str:
+        if changed and profile_name == canonical_profile_name(config.REACHY_MINI_CUSTOM_PROFILE):
+            return await asyncio.to_thread(
+                apply_tool_change,
+                instance_path,
+                get_loop,
+                restart_conversation,
+                "profile_tools_changed",
+            )
+        return "The tools will apply next time this personality is selected."
+
     async def _get_profile_tools(params: dict[str, Any]) -> dict[str, object]:
         requested_profile = _profile_param(params)
         try:
@@ -109,7 +126,7 @@ def register_profile_tool_methods(
             )
             override = await asyncio.to_thread(read_profile_tool_override, profile_name, instance_path)
             enabled_tools = (
-                list(override)
+                override
                 if override is not None
                 else await asyncio.to_thread(read_profile_default_tool_names, profile_name)
             )
@@ -142,7 +159,7 @@ def register_profile_tool_methods(
             profile_name = _validated_profile(requested_profile, known_profile_names)
             current_override = await asyncio.to_thread(read_profile_tool_override, profile_name, instance_path)
             default_tools = await asyncio.to_thread(read_profile_default_tool_names, profile_name)
-            current_tools = list(current_override) if current_override is not None else list(default_tools)
+            current_tools = current_override if current_override is not None else default_tools
             available_tools = await asyncio.to_thread(available_tool_catalog)
             available_ids = {tool["id"] for tool in available_tools}
             unknown_tools = sorted(set(enabled_tools) - available_ids - set(current_tools))
@@ -159,18 +176,7 @@ def register_profile_tool_methods(
             )
         try:
             await asyncio.to_thread(write_profile_tool_override, profile_name, enabled_tools, instance_path)
-            is_active = profile_name == canonical_profile_name(config.REACHY_MINI_CUSTOM_PROFILE)
-            apply_detail = (
-                await asyncio.to_thread(
-                    apply_tool_change,
-                    instance_path,
-                    get_loop,
-                    restart_conversation,
-                    "profile_tools_changed",
-                )
-                if is_active
-                else "The tools will apply next time this personality is selected."
-            )
+            apply_detail = await _apply_profile_tool_change(profile_name, changed=True)
         except Exception as exc:
             logger.exception("Failed to save profile tools for %r", requested_profile)
             raise_tool_settings_error("profile_tools_save_failed", str(exc))
@@ -195,18 +201,7 @@ def register_profile_tool_methods(
             default_tools = await asyncio.to_thread(read_profile_default_tool_names, profile_name)
             available_tools = await asyncio.to_thread(available_tool_catalog)
             cleared = await asyncio.to_thread(clear_profile_tool_override, profile_name, instance_path)
-            is_active = profile_name == canonical_profile_name(config.REACHY_MINI_CUSTOM_PROFILE)
-            apply_detail = (
-                await asyncio.to_thread(
-                    apply_tool_change,
-                    instance_path,
-                    get_loop,
-                    restart_conversation,
-                    "profile_tools_changed",
-                )
-                if cleared and is_active
-                else "The tools will apply next time this personality is selected."
-            )
+            apply_detail = await _apply_profile_tool_change(profile_name, changed=cleared)
         except ValueError as exc:
             raise_tool_settings_error("unknown_profile", str(exc))
         except Exception as exc:
@@ -225,15 +220,8 @@ def register_profile_tool_methods(
 
     def _vault_access_payload(profile_name: str, known_profile_names: list[str]) -> dict[str, object]:
         access = read_profile_vault_access(instance_path).get(profile_name)
-        active_profile = canonical_profile_name(config.REACHY_MINI_CUSTOM_PROFILE)
         return {
-            "profile": profile_name,
-            "is_active": profile_name == active_profile,
-            "editable": LOCKED_PROFILE is None,
-            "profiles": [
-                {"id": known_profile, "active": known_profile == active_profile}
-                for known_profile in known_profile_names
-            ],
+            **_profile_selection(profile_name, known_profile_names),
             "access": access.model_dump(mode="json", exclude_none=True) if access is not None else None,
         }
 

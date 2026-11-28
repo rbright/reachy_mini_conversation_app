@@ -102,9 +102,6 @@ class PersonalityOps:
             logger.warning("Failed to read persisted startup personality: %s", exc)
         return self._startup_choice
 
-    def _set_startup_choice(self, selected_name: str) -> None:
-        self._startup_choice = canonical_profile_name(selected_name)
-
     def _current_choice(self) -> str:
         return canonical_profile_name(config.REACHY_MINI_CUSTOM_PROFILE)
 
@@ -128,15 +125,17 @@ class PersonalityOps:
         future = asyncio.run_coroutine_threadsafe(coroutine, loop)
         return await asyncio.wait_for(asyncio.wrap_future(future), timeout=timeout)
 
-    def get_choices(self) -> dict[str, Any]:
-        """List personalities and the current startup state."""
+    def _selection_state(self) -> dict[str, str | bool | None]:
         return {
-            "choices": list_personalities(),
             "current": self._current_choice(),
             "startup": self._startup_choice_value(),
             "locked": LOCKED_PROFILE is not None,
             "locked_to": LOCKED_PROFILE,
         }
+
+    def get_choices(self) -> dict[str, Any]:
+        """List personalities and the current startup state."""
+        return {"choices": list_personalities(), **self._selection_state()}
 
     def _load_profile(self, name: str, available_tools: list[str]) -> dict[str, Any]:
         try:
@@ -149,7 +148,7 @@ class PersonalityOps:
         except (OSError, RuntimeError) as exc:
             logger.warning("Failed to load tools for profile %r: %s", name, exc)
             raise RouteError("profile_tools_unavailable", message=str(exc)) from exc
-        enabled_tools = list(override) if override is not None else list(profile.default_tools)
+        enabled_tools = override if override is not None else list(profile.default_tools)
         return {
             "instructions": profile.instructions,
             "greeting": profile.greeting or "",
@@ -174,13 +173,7 @@ class PersonalityOps:
             entry["name"] = name
             entry["avatar_id"] = avatar_id_for(name)
             personalities.append(entry)
-        return {
-            "personalities": personalities,
-            "current": self._current_choice(),
-            "startup": self._startup_choice_value(),
-            "locked": LOCKED_PROFILE is not None,
-            "locked_to": LOCKED_PROFILE,
-        }
+        return {"personalities": personalities, **self._selection_state()}
 
     def avatar(self, name: str) -> dict[str, str]:
         """Load an avatar, falling back to the packaged default."""
@@ -259,7 +252,7 @@ class PersonalityOps:
                     None if selected_name == DEFAULT_PROFILE_NAME else selected_name,
                     self._voice_override(),
                 )
-                self._set_startup_choice(selected_name)
+                self._startup_choice = selected_name
                 persisted_choice = self._startup_choice_value()
             except Exception as exc:
                 logger.warning("Failed to persist startup personality: %s", exc)
@@ -326,30 +319,6 @@ class PersonalityOps:
         except Exception as exc:
             raise RouteError("voice_apply_failed", message=str(exc)) from exc
         return {"ok": True, "status": status}
-
-
-def build_personality_ops(
-    handler: ConversationHandler,
-    get_loop: Callable[[], asyncio.AbstractEventLoop | None],
-    *,
-    persist_personality: Callable[[str | None, str | None], None] | None = None,
-    get_persisted_personality: Callable[[], str | None] | None = None,
-    apply_personality: Callable[[str | None], Awaitable[str]] | None = None,
-    get_voices: Callable[[], Awaitable[list[str]]] | None = None,
-    get_current_voice: Callable[[], str] | None = None,
-    change_voice: Callable[[str], Awaitable[str]] | None = None,
-) -> PersonalityOps:
-    """Build personality operations for a control transport."""
-    return PersonalityOps(
-        handler,
-        get_loop,
-        persist_personality=persist_personality,
-        get_persisted_personality=get_persisted_personality,
-        apply_personality=apply_personality,
-        get_voices=get_voices,
-        get_current_voice=get_current_voice,
-        change_voice=change_voice,
-    )
 
 
 def register_personality_methods(rpc: JsonRpcServer | SettingsRpcServer, ops: PersonalityOps) -> None:

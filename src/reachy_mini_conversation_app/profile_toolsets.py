@@ -111,8 +111,7 @@ def read_profile_tool_override(
     instance_path: str | Path | None,
 ) -> list[str] | None:
     """Return a profile override, distinguishing an empty override from none."""
-    tool_names = read_profile_toolsets(instance_path).profiles.get(canonical_profile_name(profile))
-    return list(tool_names) if tool_names is not None else None
+    return read_profile_toolsets(instance_path).profiles.get(canonical_profile_name(profile))
 
 
 def read_profile_default_tool_names(profile: str | None) -> list[str]:
@@ -138,8 +137,7 @@ def write_profile_tool_override(
 ) -> Path:
     """Write a complete enabled-tool override for one profile."""
     with _STORE_LOCK:
-        toolsets = read_profile_toolsets(instance_path)
-        profiles = dict(toolsets.profiles)
+        profiles = read_profile_toolsets(instance_path).profiles
         profiles[canonical_profile_name(profile)] = normalize_tool_names(tool_names)
         return write_profile_toolsets(instance_path, ProfileToolsets(profiles=profiles))
 
@@ -150,12 +148,11 @@ def clear_profile_tool_override(
 ) -> bool:
     """Clear one profile override and restore its on-disk defaults."""
     with _STORE_LOCK:
-        toolsets = read_profile_toolsets(instance_path)
+        profiles = read_profile_toolsets(instance_path).profiles
         profile_name = canonical_profile_name(profile)
-        if profile_name not in toolsets.profiles:
+        if profile_name not in profiles:
             return False
 
-        profiles = dict(toolsets.profiles)
         del profiles[profile_name]
         settings_path = get_profile_toolsets_path(instance_path)
         if profiles:
@@ -186,8 +183,7 @@ def disable_profile_tools_by_prefix(
 ) -> list[tuple[str, list[str]]]:
     """Disable matching tools per profile while preserving explicit tombstones."""
     with _STORE_LOCK:
-        toolsets = read_profile_toolsets(instance_path)
-        profiles = dict(toolsets.profiles)
+        profiles = read_profile_toolsets(instance_path).profiles
         disabled: list[tuple[str, list[str]]] = []
         seen_profiles: set[str] = set()
         for profile in profile_names:

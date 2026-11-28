@@ -42,8 +42,8 @@ export function createOrb({ initialState = ORB_STATES.IDLE, onStateChange } = {}
   const indicator = h(
     "span",
     { class: "convo-orb__indicator", "aria-hidden": "true" },
-    micIcon(),
-    micOffIcon(),
+    micIcon(false),
+    micIcon(true),
     spinnerIndicator(),
     barsIndicator(),
     thinkingDotsIndicator(),
@@ -80,11 +80,14 @@ export function createOrb({ initialState = ORB_STATES.IDLE, onStateChange } = {}
     onStateChange?.(nextState);
   }
 
+  /** Stop any pending idle fallback. Also the orb's dispose: call it before detaching the DOM node. */
+  function clearIdleTimer() {
+    clearTimeout(idleTimer);
+    idleTimer = null;
+  }
+
   function bumpIdleTimer(state) {
-    if (idleTimer != null) {
-      clearTimeout(idleTimer);
-      idleTimer = null;
-    }
+    clearIdleTimer();
     const transient =
       state === ORB_STATES.LISTENING ||
       state === ORB_STATES.THINKING ||
@@ -96,15 +99,7 @@ export function createOrb({ initialState = ORB_STATES.IDLE, onStateChange } = {}
     }, IDLE_FALLBACK_MS);
   }
 
-  /** Stop any pending timer. Call before detaching the DOM node. */
-  function dispose() {
-    if (idleTimer != null) {
-      clearTimeout(idleTimer);
-      idleTimer = null;
-    }
-  }
-
-  return { root, setState, dispose };
+  return { root, setState, dispose: clearIdleTimer };
 }
 
 // Indicators — stacked in the same grid cell, toggled via CSS data-state rules.
@@ -147,29 +142,17 @@ function voiceWaveIcon() {
   });
 }
 
-function micIcon() {
+/** Microphone glyph; the muted variant adds a slash. */
+function micIcon(muted) {
   return h("span", {
-    class: "ind ind-mic",
+    class: muted ? "ind ind-mic-off" : "ind ind-mic",
     html: `
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <rect x="9" y="2" width="6" height="12" rx="3" fill="currentColor" stroke="none"/>
         <path d="M5 10a7 7 0 0 0 14 0"/>
         <line x1="12" y1="19" x2="12" y2="22"/>
         <line x1="8" y1="22" x2="16" y2="22"/>
-      </svg>`,
-  });
-}
-
-function micOffIcon() {
-  return h("span", {
-    class: "ind ind-mic-off",
-    html: `
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <rect x="9" y="2" width="6" height="12" rx="3" fill="currentColor" stroke="none"/>
-        <path d="M5 10a7 7 0 0 0 14 0"/>
-        <line x1="12" y1="19" x2="12" y2="22"/>
-        <line x1="8" y1="22" x2="16" y2="22"/>
-        <line x1="4" y1="3" x2="20" y2="21" stroke-width="2"/>
+        ${muted ? '<line x1="4" y1="3" x2="20" y2="21" stroke-width="2"/>' : ""}
       </svg>`,
   });
 }

@@ -1,9 +1,4 @@
-"""Avatar (SVG) resolution for personality profiles.
-
-Mirrors the front-end ``AVATAR_BY_PROFILE`` map (``static/js/constants.js``);
-kept in sync by hand. Resolution order: a profile-local ``avatar.svg``, then
-the built-in map, then the default.
-"""
+"""Avatar (SVG) resolution: a profile-local ``avatar.svg``, then the built-in map, then the default."""
 
 import logging
 from pathlib import Path
@@ -13,10 +8,11 @@ from reachy_mini_conversation_app.profile_store import DEFAULT_PROFILE_NAME, can
 
 
 DEFAULT_AVATAR_FILE = "default.svg"
+_AVATARS_DIRECTORY = Path(__file__).parent / "static" / "avatars"
 logger = logging.getLogger(__name__)
 
 # Built-in profile dir name -> avatar file under static/avatars/.
-# Mirror of AVATAR_BY_PROFILE in static/js/constants.js.
+# Mirror of AVATAR_BY_PROFILE in static/js/constants.js; kept in sync by hand.
 AVATAR_BY_PROFILE: dict[str, str] = {
     "bored_teenager": "bored-teenager.svg",
     "captain_circuit": "captain-circuit.svg",
@@ -34,12 +30,7 @@ AVATAR_BY_PROFILE: dict[str, str] = {
 }
 
 
-def _avatars_dir() -> Path:
-    return Path(__file__).parent / "static" / "avatars"
-
-
 def _own_avatar_path(name: str) -> Path | None:
-    """Return a profile-local ``avatar.svg`` path when it exists, else None."""
     profile_name = canonical_profile_name(name)
     if profile_name == DEFAULT_PROFILE_NAME:
         return None
@@ -52,24 +43,14 @@ def _own_avatar_path(name: str) -> Path | None:
 
 
 def avatar_id_for(name: str) -> str:
-    """Return a stable id for a selection's avatar, for client-side caching.
-
-    Two selections that resolve to the same file share an id, so a client can
-    fetch each distinct avatar once. User personas that carry their own
-    ``avatar.svg`` get their (unique) selection as id.
-    """
+    """Return a client cache id: the selection for a profile-local avatar, else the shared file's stem."""
     if _own_avatar_path(name) is not None:
         return name
-    key = canonical_profile_name(name)
-    file = AVATAR_BY_PROFILE.get(key, DEFAULT_AVATAR_FILE)
-    return file[:-4] if file.endswith(".svg") else file
+    return AVATAR_BY_PROFILE.get(canonical_profile_name(name), DEFAULT_AVATAR_FILE).removesuffix(".svg")
 
 
 def read_avatar_svg(name: str) -> str | None:
-    """Return the SVG markup for a selection, falling back to the default.
-
-    Returns None only if even the default avatar is missing from disk.
-    """
+    """Return a selection's SVG markup, falling back to the default; None if even that is unreadable."""
     own = _own_avatar_path(name)
     if own is not None:
         try:
@@ -77,13 +58,11 @@ def read_avatar_svg(name: str) -> str | None:
         except (OSError, UnicodeError) as exc:
             logger.warning("Failed to read avatar %s: %s", own, exc)
 
-    key = canonical_profile_name(name)
-    file = AVATAR_BY_PROFILE.get(key, DEFAULT_AVATAR_FILE)
-    for candidate in (_avatars_dir() / file, _avatars_dir() / DEFAULT_AVATAR_FILE):
+    file = AVATAR_BY_PROFILE.get(canonical_profile_name(name), DEFAULT_AVATAR_FILE)
+    for candidate in (_AVATARS_DIRECTORY / file, _AVATARS_DIRECTORY / DEFAULT_AVATAR_FILE):
         if candidate.is_file():
             try:
                 return candidate.read_text(encoding="utf-8")
             except (OSError, UnicodeError) as exc:
                 logger.warning("Failed to read avatar %s: %s", candidate, exc)
-                continue
     return None

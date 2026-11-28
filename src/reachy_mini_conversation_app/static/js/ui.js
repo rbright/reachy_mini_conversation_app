@@ -20,28 +20,43 @@ export function h(tag, attrs = {}, ...children) {
       el.setAttribute(key, String(value));
     }
   }
-  appendChildren(el, children);
-  return el;
-}
-
-function appendChildren(parent, children) {
   for (const child of children.flat(Infinity)) {
     if (child == null || child === false || child === true) continue;
-    if (child instanceof Node) {
-      parent.appendChild(child);
-    } else {
-      parent.appendChild(document.createTextNode(String(child)));
-    }
+    el.appendChild(child instanceof Node ? child : document.createTextNode(String(child)));
   }
+  return el;
 }
 
 export function $(selector, root = document) {
   return root.querySelector(selector);
 }
 
+/** Labelled settings control: `<label class="settings-field">` with its caption. */
+export function settingsField(label, control) {
+  return h("label", { class: "settings-field" }, h("span", { class: "settings-label" }, label), control);
+}
+
+/** A fragment of `<option>`s for a personality picker payload ({ profiles, profile }). */
+export function profileOptions(payload) {
+  const options = document.createDocumentFragment();
+  for (const profile of payload.profiles || []) {
+    options.append(
+      h(
+        "option",
+        { value: profile.id, selected: profile.id === payload.profile ? "selected" : null },
+        `${prettifyProfileName(profile.id)}${profile.active ? " · Active" : ""}`
+      )
+    );
+  }
+  return options;
+}
+
+export function stripUserPrefix(name) {
+  return name.replace(/^user_personalities\//, "");
+}
+
 export function prettifyProfileName(name) {
-  const stripped = name.replace(/^user_personalities\//, "");
-  return stripped
+  return stripUserPrefix(name)
     .split(/[_-]/)
     .filter(Boolean)
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
@@ -49,6 +64,5 @@ export function prettifyProfileName(name) {
 }
 
 export function prettifyToolName(toolId) {
-  const leafName = toolId.includes("__") ? toolId.split("__").at(-1) : toolId;
-  return prettifyProfileName(leafName);
+  return prettifyProfileName(toolId.split("__").at(-1));
 }

@@ -6,7 +6,7 @@ import {
   resetProfileTools,
   saveProfileTools,
 } from "../api.js";
-import { h, prettifyProfileName, prettifyToolName } from "../ui.js";
+import { h, prettifyProfileName, prettifyToolName, profileOptions } from "../ui.js";
 import { confirmDialog } from "./confirm-dialog.js";
 
 export function buildProfileToolsSection({ signal, initialProfile = null, onProfileChanged } = {}) {
@@ -96,16 +96,6 @@ export function buildProfileToolsSection({ signal, initialProfile = null, onProf
     syncActions();
   }
 
-  function populateProfiles(payload) {
-    profileSelect.replaceChildren();
-    for (const profile of payload.profiles || []) {
-      const label = `${prettifyProfileName(profile.id)}${profile.active ? " · Active" : ""}`;
-      profileSelect.appendChild(
-        h("option", { value: profile.id, selected: profile.id === payload.profile ? "selected" : null }, label)
-      );
-    }
-  }
-
   function renderSummary(payload) {
     const enabledCount = payload.enabled_tools?.length || 0;
     const pills = [];
@@ -132,14 +122,10 @@ export function buildProfileToolsSection({ signal, initialProfile = null, onProf
     for (const tool of payload.available_tools || []) {
       const key = tool.kind === "tool_space" ? `space:${tool.source}` : tool.kind;
       if (!groups.has(key)) {
-        const sourceName = prettifyProfileName(tool.source.split("/").at(-1));
-        let title = `Tool Space · ${sourceName}`;
+        let title = `Tool Space · ${prettifyProfileName(tool.source.split("/").at(-1))}`;
         if (tool.kind === "shared") title = "Built-in tools";
         if (tool.kind === "external") title = "External tools";
-        groups.set(key, {
-          title,
-          tools: [],
-        });
+        groups.set(key, { title, tools: [] });
       }
       groups.get(key).tools.push(tool);
     }
@@ -192,7 +178,7 @@ export function buildProfileToolsSection({ signal, initialProfile = null, onProf
   function render(payload) {
     currentPayload = payload;
     initialEnabledTools = new Set(payload.enabled_tools || []);
-    populateProfiles(payload);
+    profileSelect.replaceChildren(profileOptions(payload));
     renderSummary(payload);
     renderToolGroups(payload);
     status.classList.remove("is-error");
@@ -242,24 +228,34 @@ export function buildProfileToolsSection({ signal, initialProfile = null, onProf
     await load(selectedProfile);
   });
 
-  saveButton.addEventListener("click", async () => {
-    if (saveButton.disabled || !currentPayload) return;
-    const enabledTools = selectedToolIds();
+  /** Send a save or reset request and render its result; the status line shows progress and failure. */
+  async function submit(pendingText, request, doneText, failurePrefix) {
     setBusy(true);
     status.classList.remove("is-error");
-    status.textContent = "Saving tool access…";
+    status.textContent = pendingText;
     try {
-      const payload = await saveProfileTools(currentPayload.profile, enabledTools);
+      const payload = await request();
       if (signal?.aborted) return;
       render(payload);
-      status.textContent = payload?.message || "Tool access saved.";
+      status.textContent = payload?.message || doneText;
     } catch (error) {
       if (signal?.aborted) return;
-      status.textContent = `Could not save tool access: ${describeError(error)}`;
+      status.textContent = `${failurePrefix}: ${describeError(error)}`;
       status.classList.add("is-error");
     } finally {
       if (!signal?.aborted) setBusy(false);
     }
+  }
+
+  saveButton.addEventListener("click", async () => {
+    if (saveButton.disabled || !currentPayload) return;
+    const enabledTools = selectedToolIds();
+    await submit(
+      "Saving tool access…",
+      () => saveProfileTools(currentPayload.profile, enabledTools),
+      "Tool access saved.",
+      "Could not save tool access"
+    );
   });
 
   resetButton.addEventListener("click", async () => {
@@ -271,22 +267,12 @@ export function buildProfileToolsSection({ signal, initialProfile = null, onProf
       signal,
     });
     if (!confirmed || signal?.aborted) return;
-
-    setBusy(true);
-    status.classList.remove("is-error");
-    status.textContent = "Restoring defaults…";
-    try {
-      const payload = await resetProfileTools(currentPayload.profile);
-      if (signal?.aborted) return;
-      render(payload);
-      status.textContent = payload?.message || "Profile defaults restored.";
-    } catch (error) {
-      if (signal?.aborted) return;
-      status.textContent = `Could not restore defaults: ${describeError(error)}`;
-      status.classList.add("is-error");
-    } finally {
-      if (!signal?.aborted) setBusy(false);
-    }
+    await submit(
+      "Restoring defaults…",
+      () => resetProfileTools(currentPayload.profile),
+      "Profile defaults restored.",
+      "Could not restore defaults"
+    );
   });
 
   return {
@@ -303,22 +289,15 @@ export function buildProfileToolsSection({ signal, initialProfile = null, onProf
 
 function toolChoice(tool, checked) {
   const unavailable = tool.kind === "unavailable";
-  const input = h("input", {
-    type: "checkbox",
-    value: tool.id,
-    checked: checked ? "checked" : null,
-  });
   return h(
     "label",
-    {
-      class: ["settings-tool-choice", unavailable && "is-unavailable"],
-    },
-    input,
+    { class: ["settings-tool-choice", unavailable && "is-unavailable"] },
+    h("input", { type: "checkbox", value: tool.id, checked: checked ? "checked" : null }),
     h(
       "span",
       { class: "settings-tool-choice-copy" },
       h("strong", { class: "settings-tool-choice-name" }, prettifyToolName(tool.id)),
-      tool.kind === "unavailable" ? h("code", { class: "settings-tool-choice-id" }, tool.id) : null,
+      unavailable ? h("code", { class: "settings-tool-choice-id" }, tool.id) : null,
       tool.description ? h("span", { class: "settings-tool-choice-description" }, tool.description) : null
     )
   );

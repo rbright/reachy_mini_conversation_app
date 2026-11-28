@@ -57,6 +57,16 @@ def _installed_search_space() -> InstalledToolSpace:
     )
 
 
+def _mcp_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    external_profiles_root = tmp_path / "external_profiles"
+    profile_dir = external_profiles_root / "mcp_profile"
+    write_profile("mcp_profile", profile_dir, "hello", [SEARCH_TOOL_ID])
+    monkeypatch.setattr(config_mod.config, "REACHY_MINI_CUSTOM_PROFILE", "mcp_profile")
+    monkeypatch.setattr(config_mod.config, "PROFILES_DIRECTORY", external_profiles_root)
+    monkeypatch.setattr(config_mod.config, "TOOLS_DIRECTORY", None)
+    monkeypatch.setattr(config_mod.config, "AUTOLOAD_EXTERNAL_TOOLS", False)
+
+
 @pytest.mark.asyncio
 async def test_initialize_tools_loads_enabled_installed_remote_tools_and_dispatches(
     tmp_path: Path,
@@ -64,14 +74,7 @@ async def test_initialize_tools_loads_enabled_installed_remote_tools_and_dispatc
 ) -> None:
     """Enabled public Space tools should join the registry and dispatch through the normal path."""
     monkeypatch.chdir(tmp_path)
-    external_profiles_root = tmp_path / "external_profiles"
-    profile_dir = external_profiles_root / "mcp_profile"
-    write_profile("mcp_profile", profile_dir, "hello", [SEARCH_TOOL_ID])
-
-    monkeypatch.setattr(config_mod.config, "REACHY_MINI_CUSTOM_PROFILE", "mcp_profile")
-    monkeypatch.setattr(config_mod.config, "PROFILES_DIRECTORY", external_profiles_root)
-    monkeypatch.setattr(config_mod.config, "TOOLS_DIRECTORY", None)
-    monkeypatch.setattr(config_mod.config, "AUTOLOAD_EXTERNAL_TOOLS", False)
+    _mcp_profile(tmp_path, monkeypatch)
 
     client = AsyncMock()
     client.call_tool.return_value = {
@@ -134,14 +137,7 @@ def test_initialize_tools_warns_when_enabled_tool_missing_from_manifest(
 ) -> None:
     """A tool enabled in the profile but absent from the cached manifest is skipped with a warning."""
     monkeypatch.chdir(tmp_path)
-    external_profiles_root = tmp_path / "external_profiles"
-    profile_dir = external_profiles_root / "remote_profile"
-    write_profile("remote_profile", profile_dir, "hello", [SEARCH_TOOL_ID])
-
-    monkeypatch.setattr(config_mod.config, "REACHY_MINI_CUSTOM_PROFILE", "remote_profile")
-    monkeypatch.setattr(config_mod.config, "PROFILES_DIRECTORY", external_profiles_root)
-    monkeypatch.setattr(config_mod.config, "TOOLS_DIRECTORY", None)
-    monkeypatch.setattr(config_mod.config, "AUTOLOAD_EXTERNAL_TOOLS", False)
+    _mcp_profile(tmp_path, monkeypatch)
 
     write_installed_tool_spaces(
         None,
@@ -184,16 +180,6 @@ def test_initialize_tools_respects_empty_profile_tool_defaults(
     core_tools_mod.initialize_tools()
 
     assert "dance" not in core_tools_mod.ALL_TOOLS
-
-
-def _mcp_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    external_profiles_root = tmp_path / "external_profiles"
-    profile_dir = external_profiles_root / "mcp_profile"
-    write_profile("mcp_profile", profile_dir, "hello", [SEARCH_TOOL_ID])
-    monkeypatch.setattr(config_mod.config, "REACHY_MINI_CUSTOM_PROFILE", "mcp_profile")
-    monkeypatch.setattr(config_mod.config, "PROFILES_DIRECTORY", external_profiles_root)
-    monkeypatch.setattr(config_mod.config, "TOOLS_DIRECTORY", None)
-    monkeypatch.setattr(config_mod.config, "AUTOLOAD_EXTERNAL_TOOLS", False)
 
 
 @pytest.mark.asyncio
@@ -275,14 +261,7 @@ def test_initialize_tools_survives_a_corrupt_installed_spaces_manifest(
     the app with no tools at all instead of just no Space tools.
     """
     monkeypatch.chdir(tmp_path)
-    external_profiles_root = tmp_path / "external_profiles"
-    profile_dir = external_profiles_root / "remote_profile"
-    write_profile("remote_profile", profile_dir, "hello", [SEARCH_TOOL_ID])
-
-    monkeypatch.setattr(config_mod.config, "REACHY_MINI_CUSTOM_PROFILE", "remote_profile")
-    monkeypatch.setattr(config_mod.config, "PROFILES_DIRECTORY", external_profiles_root)
-    monkeypatch.setattr(config_mod.config, "TOOLS_DIRECTORY", None)
-    monkeypatch.setattr(config_mod.config, "AUTOLOAD_EXTERNAL_TOOLS", False)
+    _mcp_profile(tmp_path, monkeypatch)
 
     # A well-formed envelope whose entry trips the URL validator (ValueError),
     # which is the path that no exception handler covered.

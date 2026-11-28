@@ -1,7 +1,7 @@
 """Tool cancel tool - cancel running background tools."""
 
 import logging
-from typing import TYPE_CHECKING, Any, Dict
+from typing import TYPE_CHECKING, Any
 
 from reachy_mini_conversation_app.tools.core_tools import Tool, ToolDependencies
 from reachy_mini_conversation_app.tools.tool_constants import ToolState
@@ -34,7 +34,7 @@ class TaskCancel(Tool):
         "required": ["tool_id"],
     }
 
-    async def __call__(self, deps: ToolDependencies, **kwargs: Any) -> Dict[str, Any]:
+    async def __call__(self, deps: ToolDependencies, **kwargs: Any) -> dict[str, Any]:
         """Cancel a background tool."""
         tool_id = kwargs.get("tool_id", "")
         tool_manager: BackgroundToolManager | None = kwargs.get("tool_manager")
@@ -42,7 +42,7 @@ class TaskCancel(Tool):
         if tool_manager is None:
             return {"error": "Tool manager is required."}
 
-        logger.info(f"Tool call: tool_cancel tool_id={tool_id}")
+        logger.info("Tool call: tool_cancel tool_id=%s", tool_id)
 
         if not tool_id:
             return {"error": "Tool ID is required."}
@@ -52,15 +52,13 @@ class TaskCancel(Tool):
         if not tool:
             return {"error": f"Tool {tool_id} not found."}
 
-        # Check if tool is still running
         if tool.status != ToolState.RUNNING:
             return {
-                "status": f"{tool.status.value}",
+                "status": tool.status.value,
                 "message": f"Tool '{tool.tool_name}' is not running (status: {tool.status.value}).",
                 "tool_id": tool_id,
             }
 
-        # Cancel the tool
         if await tool_manager.cancel_tool(tool_id):
             return {
                 "status": "cancelled",
@@ -68,7 +66,4 @@ class TaskCancel(Tool):
                 "tool_id": tool_id,
                 "tool_name": tool.tool_name,
             }
-        else:
-            return {
-                "error": f"Could not cancel tool {tool_id}. It may have already completed.",
-            }
+        return {"error": f"Could not cancel tool {tool_id}. It may have already completed."}

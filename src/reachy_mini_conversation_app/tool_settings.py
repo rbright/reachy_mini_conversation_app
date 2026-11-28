@@ -14,6 +14,7 @@ from reachy_mini_conversation_app.tools.core_tools import initialize_tools
 logger = logging.getLogger(__name__)
 
 RestartCallback = Callable[[str], Coroutine[None, None, None]]
+_RESTART_APP_TO_APPLY = "Saved. Restart the conversation app to apply the tool changes."
 
 
 def raise_tool_settings_error(reason: str, detail: str) -> NoReturn:
@@ -39,13 +40,13 @@ def apply_tool_change(
         initialize_tools(instance_path=instance_path, force=True)
     except Exception:
         logger.exception("Failed to reload tools after saving tool settings")
-        return "Saved. Restart the conversation app to apply the tool changes."
+        return _RESTART_APP_TO_APPLY
 
     try:
         conversation_loop = get_loop()
     except Exception:
         logger.exception("Failed to inspect the conversation loop after a tool change")
-        return "Saved. Restart the conversation app to apply the tool changes."
+        return _RESTART_APP_TO_APPLY
     if conversation_loop is None or not conversation_loop.is_running():
         return "Tools will apply when the conversation starts or restarts."
 
@@ -60,6 +61,6 @@ def apply_tool_change(
         if restart_coroutine is not None:
             restart_coroutine.close()
         logger.exception("Failed to schedule a conversation restart after a tool change")
-        return "Saved. Restart the conversation app to apply the tool changes."
+        return _RESTART_APP_TO_APPLY
     restart_future.add_done_callback(_log_restart_completion)
     return "Reconnecting the conversation to apply the tool changes."

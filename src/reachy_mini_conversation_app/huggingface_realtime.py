@@ -7,14 +7,13 @@ import random
 import asyncio
 import logging
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Final, Tuple, ClassVar, Optional
+from typing import TYPE_CHECKING, Any, Final, ClassVar
 from collections import deque
 
 import httpx
 import numpy as np
 from openai import AsyncOpenAI
 from pydantic import Field, BaseModel
-from numpy.typing import NDArray
 from huggingface_hub import get_token
 from typing_extensions import Literal, TypedDict
 from openai.types.realtime import (
@@ -47,7 +46,7 @@ from reachy_mini_conversation_app.prompts import (
     get_session_instructions,
     get_session_greeting_prompt,
 )
-from reachy_mini_conversation_app.streaming import AudioArray, AdditionalOutputs, audio_to_int16
+from reachy_mini_conversation_app.streaming import AudioArray, AdditionalOutputs, audio_to_mono, audio_to_int16
 from reachy_mini_conversation_app.audio.local_vad import SileroVAD
 from reachy_mini_conversation_app.tools.core_tools import (
     ToolSpec,
@@ -83,17 +82,15 @@ class InputTranscriptChunksByItem(BaseModel):
 
 def to_realtime_tools_config(tool_specs: list[ToolSpec]) -> RealtimeToolsConfigParam:
     """Convert app tool specs to the OpenAI-compatible realtime session shape."""
-    realtime_tools: RealtimeToolsConfigParam = []
-    for spec in tool_specs:
-        realtime_tools.append(
-            RealtimeFunctionToolParam(
-                type="function",
-                name=spec["name"],
-                description=spec["description"],
-                parameters=spec["parameters"],
-            )
+    return [
+        RealtimeFunctionToolParam(
+            type="function",
+            name=spec["name"],
+            description=spec["description"],
+            parameters=spec["parameters"],
         )
-    return realtime_tools
+        for spec in tool_specs
+    ]
 
 
 class HFNativeRateAudioPCM(TypedDict):
@@ -101,11 +98,6 @@ class HFNativeRateAudioPCM(TypedDict):
 
     type: Literal["audio/pcm"]
     rate: None
-
-
-def _native_rate_audio_pcm() -> HFNativeRateAudioPCM:
-    """Return the Hugging Face native-rate PCM config."""
-    return {"type": "audio/pcm", "rate": None}
 
 
 def _parse_turn_latency(metadata: dict[str, str] | None) -> dict[str, int | str | None] | None:
@@ -151,7 +143,6 @@ class OpenAICompatibleRealtimeHandler(ConversationHandler, ABC):
     """Shared realtime conversation loop for OpenAI-compatible providers."""
 
     BACKEND_PROVIDER: ClassVar[str]
-    SAMPLE_RATE: ClassVar[int]
     VOICE_UPDATE_REQUIRES_RECONNECT: ClassVar[bool] = False
     REFRESH_CLIENT_ON_RECONNECT: ClassVar[bool] = False
     # Local Silero VAD and barge-in run for the Hugging Face provider only; OpenAI keeps server VAD alone.
@@ -160,8 +151,8 @@ class OpenAICompatibleRealtimeHandler(ConversationHandler, ABC):
     def __init__(
         self,
         deps: ToolDependencies,
-        instance_path: Optional[str] = None,
-        startup_voice: Optional[str] = None,
+        instance_path: str | None = None,
+        startup_voice: str | None = None,
     ):
         """Initialize the handler."""
         super().__init__()
@@ -170,22 +161,19 @@ class OpenAICompatibleRealtimeHandler(ConversationHandler, ABC):
 
         self.client: AsyncOpenAI
         self.connection: "AsyncRealtimeConnection | None" = None
-        self.output_queue: "asyncio.Queue[Tuple[int, NDArray[np.int16]] | AdditionalOutputs]" = asyncio.Queue()
+        self.output_queue = asyncio.Queue()
 
         self.instance_path = instance_path
-        self._voice_override: str | None = self._normalize_startup_voice(startup_voice)
+        self._voice_override: str | None = self._resolve_backend_voice(startup_voice, source="persisted startup voice")
         self._realtime_connect_query: dict[str, str] = {}
 
-        # Debouncing for partial transcripts
         self.partial_transcript_task: asyncio.Task[None] | None = None
         self.partial_debounce_delay = 0.5  # seconds
         self.input_transcript_chunks_by_item = InputTranscriptChunksByItem()
 
-        # Internal lifecycle flags
         self._connected_event: asyncio.Event = asyncio.Event()
         self._shutting_down = False
 
-        # Background tool manager
         self.tool_manager = BackgroundToolManager()
 
         # Response-in-progress guard: the Realtime API only allows one active
@@ -315,10 +303,6 @@ class OpenAICompatibleRealtimeHandler(ConversationHandler, ABC):
             sanitized["image_attached"] = True
             return sanitized
         return tool_result
-
-    def _normalize_startup_voice(self, voice: str | None) -> str | None:
-        """Return a valid persisted startup voice, or None."""
-        return self._resolve_backend_voice(voice, source="persisted startup voice")
 
     async def _wait_for_response_done_before_tool_result(self) -> bool:
         """Return whether the function-call response finished before sending tool output."""
@@ -520,23 +504,10 @@ class OpenAICompatibleRealtimeHandler(ConversationHandler, ABC):
             if input_transcript.item_id == item_id and len(input_transcript.deltas) - 1 == sequence_counter:
                 await self.output_queue.put(AdditionalOutputs({"role": "user_partial", "content": transcript}))
                 self._emit_transcript("user", transcript, False)
-                logger.debug(f"Debounced partial emitted: {transcript}")
+                logger.debug("Debounced partial emitted: %s", transcript)
         except asyncio.CancelledError:
             logger.debug("Debounced partial cancelled")
             raise
-
-    def _record_partial_transcript_delta(
-        self,
-        input_transcript: InputTranscriptChunksByItem,
-        item_id: str,
-        delta: str,
-    ) -> None:
-        """Append an incremental partial transcript fragment for one item."""
-        if input_transcript.item_id != item_id:
-            input_transcript.item_id = item_id
-            input_transcript.deltas = [delta]
-            return
-        input_transcript.deltas.append(delta)
 
     async def start_up(self) -> None:
         """Start the handler with minimal retries on unexpected websocket closure."""
@@ -554,7 +525,6 @@ class OpenAICompatibleRealtimeHandler(ConversationHandler, ABC):
         for attempt in range(1, max_attempts + 1):
             try:
                 await self._run_realtime_session()
-                # Normal exit from the session, stop retrying
                 return
             except ConnectionClosedError as e:
                 if is_quota_exhausted(e):
@@ -565,7 +535,7 @@ class OpenAICompatibleRealtimeHandler(ConversationHandler, ABC):
                     if self.REFRESH_CLIENT_ON_RECONNECT:
                         self.client = await self._build_realtime_client()
                     # exponential backoff with jitter
-                    base_delay = 2 ** (attempt - 1)  # 1s, 2s, 4s, 8s, etc.
+                    base_delay = 2 ** (attempt - 1)
                     jitter = random.uniform(0, 0.5)
                     delay = base_delay + jitter
                     logger.info("Retrying in %.1f seconds...", delay)
@@ -575,22 +545,16 @@ class OpenAICompatibleRealtimeHandler(ConversationHandler, ABC):
             finally:
                 # never keep a stale reference
                 self.connection = None
-                try:
-                    self._connected_event.clear()
-                except Exception:
-                    pass
+                self._connected_event.clear()
 
     async def _restart_session(self) -> None:
-        """Force-close the current session and start a fresh one in background.
-
-        Does not block the caller while the new session is establishing.
-        """
+        """Force-close the current session and start a fresh one in the background without blocking the caller."""
         try:
             if self.connection is not None:
                 try:
                     await self.connection.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("connection.close() ignored: %s", e)
                 finally:
                     self.connection = None
 
@@ -600,10 +564,7 @@ class OpenAICompatibleRealtimeHandler(ConversationHandler, ABC):
                 return
 
             # Fire-and-forget new session and wait briefly for connection
-            try:
-                self._connected_event.clear()
-            except Exception:
-                pass
+            self._connected_event.clear()
             self.client = await self._build_realtime_client()
             asyncio.create_task(self._run_realtime_session(), name="realtime-session-restart")
             try:
@@ -615,10 +576,7 @@ class OpenAICompatibleRealtimeHandler(ConversationHandler, ABC):
             logger.warning("_restart_session failed: %s", e)
 
     async def _safe_response_create(self, **kwargs: Any) -> None:
-        """Enqueue a response.create() kwargs for the sender worker _response_sender_loop().
-
-        This method never blocks the caller.
-        """
+        """Enqueue response.create() kwargs for _response_sender_loop() without blocking the caller."""
         await self._pending_responses.put(kwargs)
 
     async def interrupt(self) -> None:
@@ -626,12 +584,7 @@ class OpenAICompatibleRealtimeHandler(ConversationHandler, ABC):
         await self._interrupt_playback(cancel_response_id=self._active_response_id)
 
     async def say(self, text: str) -> None:
-        """Inject ``text`` as a turn and have the model voice it now.
-
-        Mirrors the startup-greeting path: create a user message item, then
-        queue a ``response.create`` through the serial sender. Not verbatim TTS
-        (speech-to-speech may rephrase). Raises if the session is closed.
-        """
+        """Inject ``text`` as a user turn and queue a response; speech-to-speech may rephrase it."""
         text = (text or "").strip()
         if not text:
             raise ValueError("say: empty text")
@@ -771,11 +724,7 @@ class OpenAICompatibleRealtimeHandler(ConversationHandler, ABC):
             tool_result_for_model = tool_result
         elif completed_tool.result is not None:
             tool_result = completed_tool.result
-            tool_result_for_model = (
-                self._sanitize_tool_result_for_model(completed_tool.tool_name, tool_result)
-                if isinstance(tool_result, dict)
-                else tool_result
-            )
+            tool_result_for_model = self._sanitize_tool_result_for_model(completed_tool.tool_name, tool_result)
             logger.info(
                 "Tool '%s' (id=%s) executed successfully.",
                 completed_tool.tool_name,
@@ -799,14 +748,10 @@ class OpenAICompatibleRealtimeHandler(ConversationHandler, ABC):
             return
 
         try:
-            send_result_to_model = not completed_tool.is_idle_tool_call
-            if send_result_to_model:
-                self._mark_activity("tool_result_ready")
             model_result_submitted = False
-            if send_result_to_model and isinstance(completed_tool.id, str):
+            if not completed_tool.is_idle_tool_call:
+                self._mark_activity("tool_result_ready")
                 if not await self._wait_for_response_done_before_tool_result():
-                    send_result_to_model = False
-                if not send_result_to_model:
                     logger.warning(
                         "Dropping realtime model result for tool '%s' (id=%s) because response.done was not observed",
                         completed_tool.tool_name,
@@ -873,8 +818,7 @@ class OpenAICompatibleRealtimeHandler(ConversationHandler, ABC):
                         jpeg_bytes,
                     )
 
-            if isinstance(completed_tool.id, str):
-                self._in_flight_tool_calls.discard(completed_tool.id)
+            self._in_flight_tool_calls.discard(completed_tool.id)
 
             tool = core_tools.get_tools().get(completed_tool.tool_name)
             # Always surface errors, skip the spoken follow-up for tools that opt out.
@@ -911,7 +855,7 @@ class OpenAICompatibleRealtimeHandler(ConversationHandler, ABC):
                 await conn.session.update(session=session_config)
                 logger.info(
                     "Realtime session initialized with profile=%r voice=%r",
-                    getattr(config, "REACHY_MINI_CUSTOM_PROFILE", None),
+                    config.REACHY_MINI_CUSTOM_PROFILE,
                     self.get_current_voice(),
                 )
             except Exception:
@@ -923,26 +867,19 @@ class OpenAICompatibleRealtimeHandler(ConversationHandler, ABC):
             if self._shutting_down:
                 return
 
-            # Reset the partial-transcript accumulator for each new session
             self.input_transcript_chunks_by_item = InputTranscriptChunksByItem()
 
-            # Manage events received from the realtime server.
             self.connection = conn
             self._active_response_id = None
             self._audio_response_id = None
             self._discarded_response_ids.clear()
             self._playback_interrupted = False
-            try:
-                self._connected_event.set()
-            except Exception:
-                pass
+            self._connected_event.set()
 
             response_sender_task: asyncio.Task[None] | None = None
             try:
-                # Start the background tool manager
                 self.tool_manager.start_up(tool_callbacks=[self._handle_tool_result])
 
-                # Start the response sender worker
                 response_sender_task = asyncio.create_task(self._response_sender_loop(), name="response-sender")
                 await self._send_startup_greeting_prompt()
 
@@ -1004,25 +941,27 @@ class OpenAICompatibleRealtimeHandler(ConversationHandler, ABC):
 
                     if event.type == "conversation.item.input_audio_transcription.delta":
                         self._mark_activity("user_transcription_delta")
-                        logger.debug(f"User partial transcript: {event.delta}")
+                        logger.debug("User partial transcript: %s", event.delta)
 
                         item_id = event.item_id
                         delta = event.delta or ""
 
                         input_transcript = self.input_transcript_chunks_by_item
-                        self._record_partial_transcript_delta(input_transcript, item_id, delta)
+                        if input_transcript.item_id != item_id:
+                            input_transcript.item_id = item_id
+                            input_transcript.deltas = [delta]
+                        else:
+                            input_transcript.deltas.append(delta)
 
                         current_partial = "".join(input_transcript.deltas)
                         sequence_counter = len(input_transcript.deltas) - 1
 
                         await self._cancel_partial_transcript_task()
 
-                        # Start new debounce timer with the last delta
                         self.partial_transcript_task = asyncio.create_task(
                             self._emit_debounced_partial(current_partial, item_id, sequence_counter)
                         )
 
-                    # Handle completed transcription (user finished speaking)
                     if event.type == "conversation.item.input_audio_transcription.completed":
                         self._mark_activity("user_transcription_completed")
                         raw_transcript = event.transcript or ""
@@ -1055,7 +994,6 @@ class OpenAICompatibleRealtimeHandler(ConversationHandler, ABC):
                         self._emit_transcript("user", transcript, True)
                         self.deps.vault_session.record("user", transcript)
 
-                    # Handle assistant transcription
                     if event.type == "response.output_audio_transcript.done":
                         if event.response_id in self._discarded_response_ids:
                             continue
@@ -1067,7 +1005,6 @@ class OpenAICompatibleRealtimeHandler(ConversationHandler, ABC):
                         self._emit_transcript("assistant", event.transcript or "", True)
                         self.deps.vault_session.record("assistant", event.transcript or "")
 
-                    # Handle audio delta
                     if event.type == "response.output_audio.delta":
                         if event.response_id in self._discarded_response_ids:
                             continue
@@ -1088,7 +1025,6 @@ class OpenAICompatibleRealtimeHandler(ConversationHandler, ABC):
                                 decoded_pcm,
                             ),
                         )
-                    # ---- tool-calling plumbing ----
                     if event.type == "response.function_call_arguments.done":
                         self._mark_activity("tool_call_received")
                         tool_name = getattr(event, "name", None)
@@ -1139,7 +1075,6 @@ class OpenAICompatibleRealtimeHandler(ConversationHandler, ABC):
                             call_id,
                         )
 
-                    # server error
                     if event.type == "error":
                         err = getattr(event, "error", None)
                         msg = getattr(err, "message", str(err) if err else "unknown error")
@@ -1172,7 +1107,6 @@ class OpenAICompatibleRealtimeHandler(ConversationHandler, ABC):
                 self._reset_listening()
                 self._active_response_id = None
                 self._audio_response_id = None
-                # Stop the response sender worker.
                 if response_sender_task is not None:
                     response_sender_task.cancel()
                     try:
@@ -1183,17 +1117,8 @@ class OpenAICompatibleRealtimeHandler(ConversationHandler, ABC):
                 # Stop background tool manager tasks (listener + cleanup) in all paths.
                 await self.tool_manager.shutdown()
 
-    # Microphone receive
-    async def receive(self, frame: Tuple[int, AudioArray]) -> None:
-        """Receive audio frame from the microphone and send it to the realtime server.
-
-        Handles both mono and stereo audio formats, converting to the expected
-        mono format for the realtime API.
-
-        Args:
-            frame: A tuple containing (sample_rate, audio_data).
-
-        """
+    async def receive(self, frame: tuple[int, AudioArray]) -> None:
+        """Send one microphone frame, reduced to mono int16, to the realtime server and to local VAD when it runs."""
         sample_rate, audio_frame = frame
         if audio_frame.size == 0:
             return
@@ -1208,17 +1133,7 @@ class OpenAICompatibleRealtimeHandler(ConversationHandler, ABC):
             if connection is None:
                 return
 
-        # Reshape if needed
-        if audio_frame.ndim == 2:
-            # channels-last convention
-            if audio_frame.shape[1] > audio_frame.shape[0]:
-                audio_frame = audio_frame.T
-            # Multiple channels -> Mono channel
-            if audio_frame.shape[1] > 1:
-                audio_frame = audio_frame[:, 0]
-
-        # Cast if needed
-        audio_frame = audio_to_int16(audio_frame)
+        audio_frame = audio_to_int16(audio_to_mono(audio_frame))
 
         # Send to the realtime input buffer (guard against races during reconnect).
         try:
@@ -1278,14 +1193,13 @@ class OpenAICompatibleRealtimeHandler(ConversationHandler, ABC):
             try:
                 await self.connection.close()
             except ConnectionClosedError as e:
-                logger.debug(f"Connection already closed during shutdown: {e}")
+                logger.debug("Connection already closed during shutdown: %s", e)
             except Exception as e:
-                logger.debug(f"connection.close() ignored: {e}")
+                logger.debug("connection.close() ignored: %s", e)
             finally:
                 self.connection = None
                 self._connected_event.clear()
 
-        # Clear any remaining items in the output queue
         while not self.output_queue.empty():
             try:
                 self.output_queue.get_nowait()
@@ -1311,7 +1225,7 @@ class HuggingFaceRealtimeHandler(OpenAICompatibleRealtimeHandler):
 
     def _audio_format(self) -> HFNativeRateAudioPCM:
         """Return the Hugging Face native-rate PCM config."""
-        return _native_rate_audio_pcm()
+        return {"type": "audio/pcm", "rate": None}
 
     async def _build_realtime_client(self) -> AsyncOpenAI:
         """Build the Hugging Face OpenAI-compatible realtime client."""

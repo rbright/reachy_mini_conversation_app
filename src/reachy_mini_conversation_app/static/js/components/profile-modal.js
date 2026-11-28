@@ -22,7 +22,7 @@ export function openProfileModal({ mode = "create", initial = {}, signal } = {})
     }
 
     const returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const overlay = buildOverlay();
+    const overlay = h("div", { class: "modal-overlay", role: "presentation" });
     const dialog = buildDialog({ isEdit, initial });
     overlay.appendChild(dialog);
     document.body.appendChild(overlay);
@@ -37,7 +37,9 @@ export function openProfileModal({ mode = "create", initial = {}, signal } = {})
     function close(value) {
       if (settled) return;
       settled = true;
-      cleanup();
+      window.removeEventListener("keydown", onKeydown);
+      signal?.removeEventListener("abort", onAbort);
+      overlay.remove();
       if (returnFocus?.isConnected) returnFocus.focus();
       resolve(value);
     }
@@ -47,35 +49,24 @@ export function openProfileModal({ mode = "create", initial = {}, signal } = {})
         close(null);
         return;
       }
-      if (event.key === "Tab") {
-        const focusable = Array.from(
-          dialog.querySelectorAll('button, input, textarea, select, [tabindex]:not([tabindex="-1"])')
-        ).filter((el) => !el.disabled);
-        if (focusable.length === 0) return;
-        const first = focusable[0];
-        const last = focusable[focusable.length - 1];
-        if (event.shiftKey) {
-          if (document.activeElement === first) {
-            event.preventDefault();
-            last.focus();
-          }
-        } else {
-          if (document.activeElement === last) {
-            event.preventDefault();
-            first.focus();
-          }
-        }
+      if (event.key !== "Tab") return;
+      const focusable = Array.from(
+        dialog.querySelectorAll('button, input, textarea, select, [tabindex]:not([tabindex="-1"])')
+      ).filter((el) => !el.disabled);
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
       }
     }
 
     function onAbort() {
       close(null);
-    }
-
-    function cleanup() {
-      window.removeEventListener("keydown", onKeydown);
-      signal?.removeEventListener("abort", onAbort);
-      overlay.remove();
     }
 
     overlay.addEventListener("click", (event) => {
@@ -110,13 +101,6 @@ export function openProfileModal({ mode = "create", initial = {}, signal } = {})
 
       close({ name, instructions, greeting });
     });
-  });
-}
-
-function buildOverlay() {
-  return h("div", {
-    class: "modal-overlay",
-    role: "presentation",
   });
 }
 

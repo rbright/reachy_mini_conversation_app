@@ -2,13 +2,9 @@ import re
 import random
 import logging
 import unicodedata
-from typing import TYPE_CHECKING, Any, Dict
+from typing import Any
 
 from reachy_mini_conversation_app.tools.core_tools import Tool, ToolDependencies
-
-
-if TYPE_CHECKING:
-    from reachy_mini.motion.recorded_move import RecordedMoves
 
 
 logger = logging.getLogger(__name__)
@@ -19,7 +15,7 @@ try:
 
     EMOTION_AVAILABLE = True
 except Exception as e:
-    logger.warning(f"Emotion library not available: {e}")
+    logger.warning("Emotion library not available: %s", e)
     EMOTION_AVAILABLE = False
 
 
@@ -254,7 +250,7 @@ class PlayEmotion(Tool):
     }
     _library: "RecordedMoves | None" = None
 
-    async def __call__(self, deps: ToolDependencies, **kwargs: Any) -> Dict[str, Any]:
+    async def __call__(self, deps: ToolDependencies, **kwargs: Any) -> dict[str, Any]:
         """Play a pre-recorded emotion."""
         if not EMOTION_AVAILABLE:
             return {"error": "Emotion system not available"}

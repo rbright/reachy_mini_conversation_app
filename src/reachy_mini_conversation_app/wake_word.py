@@ -12,7 +12,7 @@ from importlib.resources import files
 import numpy as np
 from numpy.typing import NDArray
 
-from reachy_mini_conversation_app.streaming import AudioArray, audio_to_int16
+from reachy_mini_conversation_app.streaming import AudioArray, audio_to_mono, audio_to_int16
 
 
 logger = logging.getLogger(__name__)
@@ -90,14 +90,7 @@ class WakeWordDetector:
         if self._model is None:
             raise RuntimeError("Wake-word detector is not loaded")
 
-        samples = audio
-        if samples.ndim == 2:
-            if samples.shape[1] > samples.shape[0]:
-                samples = samples.T
-            if samples.shape[1] > 1:
-                samples = samples[:, 0]
-
-        mono = audio_to_int16(samples).reshape(-1)
+        mono = audio_to_int16(audio_to_mono(audio)).reshape(-1)
         sample_offset = 0
         while sample_offset < mono.size:
             copy_size = min(WAKE_WORD_WINDOW_SAMPLES - self._window_size, mono.size - sample_offset)

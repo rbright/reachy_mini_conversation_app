@@ -57,12 +57,12 @@ def daemon_request(
         except (json.JSONDecodeError, UnicodeDecodeError, OSError, IncompleteRead) as body_error:
             raise DaemonApiError(f"{message}; could not read error detail: {body_error}", status_code=e.code) from e
         detail = error_response.get("detail") if isinstance(error_response, dict) else None
-        if not isinstance(detail, str):
-            detail = None
-        if detail is not None:
+        if isinstance(detail, str):
             message = f"{message}: {detail}"
+        else:
+            detail = None
         raise DaemonApiError(message, status_code=e.code, detail=detail) from e
-    except (urllib.error.URLError, TimeoutError, OSError) as e:
+    except OSError as e:
         raise DaemonApiError(f"{method} {path} failed: {e}") from e
 
     try:

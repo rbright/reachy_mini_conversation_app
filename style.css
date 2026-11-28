@@ -1,8 +1,6 @@
 /* Hugging Face Space landing page; application UI styles live under src/. */
 :root {
 	--bg: #060c1d;
-	--panel: #0c172b;
-	--glass: rgba(17, 27, 48, 0.7);
 	--card: rgba(255, 255, 255, 0.04);
 	--accent: #7af5c4;
 	--accent-2: #f6c452;
@@ -65,7 +63,6 @@ a {
 	gap: 0.5rem;
 	font-weight: 700;
 	letter-spacing: 0.5px;
-	color: var(--text);
 }
 
 .logo {
@@ -154,12 +151,11 @@ a {
 	border-radius: 12px;
 	font-weight: 700;
 	border: 1px solid transparent;
-	cursor: pointer;
 	transition: transform 0.2s ease, box-shadow 0.2s ease, background 0.2s ease, border-color 0.2s ease;
 }
 
 .btn.primary {
-	background: linear-gradient(135deg, #7af5c4, #7c8eff);
+	background: linear-gradient(135deg, var(--accent), #7c8eff);
 	color: #0a0f1f;
 	box-shadow: 0 15px 30px rgba(122, 245, 196, 0.25);
 }
@@ -172,7 +168,6 @@ a {
 .btn.ghost {
 	background: rgba(255, 255, 255, 0.05);
 	border-color: var(--border);
-	color: var(--text);
 }
 
 .btn.ghost:hover {
@@ -198,7 +193,7 @@ a {
 	padding: 0.5rem 0.8rem;
 	border-radius: 10px;
 	border: 1px solid var(--border);
-	background: rgba(255, 255, 255, 0.04);
+	background: var(--card);
 }
 
 .hero-visual .glass-card {
@@ -343,7 +338,6 @@ a {
 	border-radius: 12px;
 	background: rgba(0, 0, 0, 0.2);
 	border: 1px solid var(--border);
-	color: var(--text);
 	font-size: 0.9rem;
 }
 
@@ -379,7 +373,6 @@ a {
 
 	.btn {
 		width: 100%;
-		justify-content: center;
 	}
 
 	.hero-badges {

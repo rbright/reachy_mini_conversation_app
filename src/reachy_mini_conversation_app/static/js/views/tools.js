@@ -111,12 +111,7 @@ function buildToolSpacesSection({ signal, onBeforeChange, onChanged } = {}) {
     editable = payload?.editable !== false;
     const spaces = Array.isArray(payload?.spaces) ? payload.spaces : [];
     list.replaceChildren();
-    if (!spaces.length) {
-      list.appendChild(h("p", { class: "settings-hint" }, "No Tool Spaces installed."));
-      setBusy(busy);
-      if (!editable) status.textContent = "Tool Space editing is locked by the administrator.";
-      return;
-    }
+    if (!spaces.length) list.appendChild(h("p", { class: "settings-hint" }, "No Tool Spaces installed."));
 
     for (const space of spaces) {
       const toolCount = Number(space.tool_count) || 0;

@@ -5,12 +5,12 @@ into the app's tool interface without mutating the local project environment or
 downloading third-party Python code.
 """
 
-from __future__ import annotations
 import re
-from typing import TYPE_CHECKING, Any, Mapping, Sequence, AsyncIterator
+from typing import TYPE_CHECKING, Any
 from contextlib import asynccontextmanager
 from dataclasses import field, dataclass
 from urllib.parse import urlparse
+from collections.abc import Mapping, Sequence, AsyncGenerator
 
 
 if TYPE_CHECKING:
@@ -68,7 +68,7 @@ def _normalize_name_segment(label: str, value: str) -> str:
         raise ValueError(f"{label.capitalize()} '{value}' cannot be normalized into a valid tool identifier.")
     if normalized[0].isdigit():
         normalized = f"tool_{normalized}"
-    return _require_name_segment(label, normalized)
+    return normalized
 
 
 def validate_http_mcp_url(url: str) -> str:
@@ -90,14 +90,6 @@ def build_namespaced_tool_name(server_alias: str, tool_name: str) -> str:
     alias = _require_name_segment("server alias", server_alias)
     tool_segment = _normalize_name_segment("tool name", tool_name)
     return f"{alias}{_NAMESPACE_SEPARATOR}{tool_segment}"
-
-
-def _dump_content_block(block: object) -> dict[str, Any]:
-    if hasattr(block, "model_dump"):
-        dumped = block.model_dump(mode="json", by_alias=True, exclude_none=True)
-        if isinstance(dumped, dict):
-            return dumped
-    return {"type": getattr(block, "type", "unknown")}
 
 
 def _join_text_content(content_blocks: list[dict[str, Any]]) -> str | None:
@@ -126,13 +118,13 @@ def _exception_contains_timeout(exc: BaseException) -> bool:
     if _is_timeout_mcp_error(exc):
         return True
 
-    if "timed out" in str(exc).lower() or "deadline exceeded" in str(exc).lower():
+    message = str(exc).lower()
+    if "timed out" in message or "deadline exceeded" in message:
         return True
 
     nested: list[BaseException] = []
-    grouped_exceptions = getattr(exc, "exceptions", None)
-    if isinstance(grouped_exceptions, tuple):
-        nested.extend(grouped_exceptions)
+    if isinstance(exc, BaseExceptionGroup):
+        nested.extend(exc.exceptions)
     if exc.__cause__ is not None:
         nested.append(exc.__cause__)
     if exc.__context__ is not None:
@@ -204,12 +196,8 @@ class RemoteToolSpec:
     @classmethod
     def from_mcp_tool(cls, server_alias: str, tool: "McpTool") -> "RemoteToolSpec":
         """Build an app-facing spec from an MCP SDK tool descriptor."""
-        description = (getattr(tool, "description", None) or "").strip()
-        parameters_schema = getattr(tool, "input_schema", None)
-        if not isinstance(parameters_schema, dict):
-            parameters_schema = {"type": "object", "properties": {}, "required": []}
-
-        remote_name = str(getattr(tool, "name", "")).strip()
+        description = (tool.description or "").strip()
+        remote_name = tool.name.strip()
         if not remote_name:
             raise ValueError("Remote MCP tool is missing a name.")
 
@@ -218,7 +206,7 @@ class RemoteToolSpec:
             remote_name=remote_name,
             namespaced_name=build_namespaced_tool_name(server_alias, remote_name),
             description=description or f"Remote MCP tool '{remote_name}' from server '{server_alias}'.",
-            parameters_schema=dict(parameters_schema),
+            parameters_schema=dict(tool.input_schema),
         )
 
     def to_function_spec(self) -> dict[str, Any]:
@@ -252,15 +240,15 @@ class RemoteToolCallResponse:
         result: "McpCallToolResult",
     ) -> "RemoteToolCallResponse":
         """Convert an MCP SDK tool result into the app's result envelope."""
-        content_blocks = [_dump_content_block(block) for block in getattr(result, "content", [])]
+        content_blocks = [block.model_dump(mode="json", by_alias=True, exclude_none=True) for block in result.content]
         return cls(
             server_alias=server_alias,
             remote_tool_name=remote_tool_name,
             namespaced_tool_name=build_namespaced_tool_name(server_alias, remote_tool_name),
-            status="error" if bool(getattr(result, "is_error", False)) else "ok",
+            status="error" if result.is_error else "ok",
             content_blocks=content_blocks,
             text=_join_text_content(content_blocks),
-            structured_content=getattr(result, "structured_content", None),
+            structured_content=result.structured_content,
         )
 
     def to_tool_result(self) -> dict[str, Any]:
@@ -312,7 +300,6 @@ class RemoteMcpToolClient:
     async def call_tool(self, namespaced_tool_name: str, arguments: Mapping[str, Any] | None = None) -> dict[str, Any]:
         """Invoke a remote MCP tool by its namespaced local ID."""
         spec = await self._resolve_tool_spec(namespaced_tool_name)
-        timeout_exception = _httpx_timeout_exception_type()
 
         try:
             async with self._connected_client() as client:
@@ -323,10 +310,6 @@ class RemoteMcpToolClient:
                 )
         except McpDependencyError:
             raise
-        except timeout_exception as exc:
-            raise McpToolTimeoutError(
-                f"Timed out calling MCP tool '{namespaced_tool_name}' from '{self.server.alias}'."
-            ) from exc
         except Exception as exc:
             if _exception_contains_timeout(exc):
                 raise McpToolTimeoutError(
@@ -359,12 +342,12 @@ class RemoteMcpToolClient:
         while True:
             page = await client.list_tools(cursor=cursor)
             tools.extend(page.tools)
-            cursor = getattr(page, "next_cursor", None)
+            cursor = page.next_cursor
             if cursor is None:
                 return tools
 
     @asynccontextmanager
-    async def _connected_client(self) -> AsyncIterator["Client"]:
+    async def _connected_client(self) -> AsyncGenerator["Client", None]:
         client_cls, streamable_http_client = _load_mcp_sdk()
         httpx2 = _load_httpx2()
         client_timeout = max(self.server.request_timeout_s, self.server.tool_timeout_s)

@@ -10,7 +10,7 @@ import {
   untilReady,
 } from "../api.js";
 import { AVATAR_BY_PROFILE, ROUTES, avatarFor } from "../constants.js";
-import { $, h, prettifyProfileName } from "../ui.js";
+import { $, h, prettifyProfileName, stripUserPrefix } from "../ui.js";
 import { openProfileModal } from "../components/profile-modal.js";
 import { confirmDialog } from "../components/confirm-dialog.js";
 import { setPendingApply } from "../pending-apply.js";
@@ -41,13 +41,18 @@ export async function mountHomeView({ outlet, signal, navigate }) {
   let personalities;
   try {
     personalities = await untilReady(listPersonalities, signal, () => {
-      grid.replaceChildren();
-      grid.appendChild(h("p", { class: "muted" }, "Waiting for Reachy to finish starting…"));
+      grid.replaceChildren(h("p", { class: "muted" }, "Waiting for Reachy to finish starting…"));
     });
   } catch (error) {
     if (signal.aborted) return;
-    grid.replaceChildren();
-    grid.appendChild(renderError("Could not list personalities", error));
+    grid.replaceChildren(
+      h(
+        "div",
+        { class: "view-error" },
+        h("p", null, "Could not list personalities"),
+        h("p", { class: "muted small" }, describeError(error))
+      )
+    );
     return;
   }
   if (signal.aborted) return;
@@ -80,6 +85,11 @@ export async function mountHomeView({ outlet, signal, navigate }) {
   if (lockedTo) {
     status.textContent = `Personality locked to “${prettifyProfileName(lockedTo)}”; switching is disabled.`;
     status.classList.add("is-warning");
+  }
+
+  function showError(message) {
+    status.textContent = message;
+    status.classList.add("is-error");
   }
 
   function handleSelection(name) {
@@ -118,8 +128,7 @@ export async function mountHomeView({ outlet, signal, navigate }) {
       newName = saveResult?.value || created.name;
     } catch (error) {
       if (signal.aborted) return;
-      status.textContent = `Failed to create profile: ${describeError(error)}`;
-      status.classList.add("is-error");
+      showError(`Failed to create profile: ${describeError(error)}`);
       return;
     }
     setPersonality(newName);
@@ -134,8 +143,7 @@ export async function mountHomeView({ outlet, signal, navigate }) {
       data = await loadPersonality(name);
     } catch (error) {
       if (signal.aborted) return;
-      status.textContent = `Could not load "${prettifyProfileName(name)}": ${describeError(error)}`;
-      status.classList.add("is-error");
+      showError(`Could not load "${prettifyProfileName(name)}": ${describeError(error)}`);
       return;
     }
     if (signal.aborted) return;
@@ -163,8 +171,7 @@ export async function mountHomeView({ outlet, signal, navigate }) {
       });
     } catch (error) {
       if (signal.aborted) return;
-      status.textContent = `Failed to save: ${describeError(error)}`;
-      status.classList.add("is-error");
+      showError(`Failed to save: ${describeError(error)}`);
       return;
     }
     if (signal.aborted) return;
@@ -194,8 +201,7 @@ export async function mountHomeView({ outlet, signal, navigate }) {
       await deletePersonality(name);
     } catch (error) {
       if (signal.aborted) return;
-      status.textContent = `Failed to delete: ${describeError(error)}`;
-      status.classList.add("is-error");
+      showError(`Failed to delete: ${describeError(error)}`);
       return;
     }
     if (signal.aborted) return;
@@ -224,7 +230,6 @@ function buildPersonalityCard({ name, isActive, disabled, onSelect, onManageTool
         alt: "",
         loading: "lazy",
         "aria-hidden": "true", // card label already names the personality
-
         class: !hasAvatar ? "personality-card__avatar--fallback" : null,
       })
     ),
@@ -293,12 +298,14 @@ function buildEditButton({ name, onEdit }) {
 }
 
 function checkBadge() {
-  const badge = h("span", { class: "personality-card__badge", "aria-hidden": "true" });
-  badge.innerHTML = `
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
-      <polyline points="20 6 9 17 4 12"/>
-    </svg>`;
-  return badge;
+  return h("span", {
+    class: "personality-card__badge",
+    "aria-hidden": "true",
+    html: `
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="20 6 9 17 4 12"/>
+      </svg>`,
+  });
 }
 
 function buildCustomCard({ onClick }) {
@@ -315,17 +322,4 @@ function buildCustomCard({ onClick }) {
     h("span", { class: "personality-card__hint" }, "Write your own prompt")
   );
   return h("div", { class: "personality-card-slot", role: "listitem" }, card);
-}
-
-function stripUserPrefix(name) {
-  return name.replace(/^user_personalities\//, "");
-}
-
-function renderError(label, error) {
-  return h(
-    "div",
-    { class: "view-error" },
-    h("p", null, label),
-    h("p", { class: "muted small" }, describeError(error))
-  );
 }

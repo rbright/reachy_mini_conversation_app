@@ -1,1 +1,1 @@
-"""Nothing (for ruff)."""
+"""LLM-callable tools for the conversation app."""

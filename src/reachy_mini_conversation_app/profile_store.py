@@ -92,12 +92,9 @@ def _parse_profile_document(source_path: Path) -> ProfileDefinition:
         ) from exc
 
     try:
-        raw_metadata: object = tomllib.loads("\n".join(lines[1:closing_index]))
+        metadata: dict[str, object] = tomllib.loads("\n".join(lines[1:closing_index]))
     except tomllib.TOMLDecodeError as exc:
         raise ProfileFormatError(f"Invalid TOML front matter in {source_path}: {exc}") from exc
-    if not isinstance(raw_metadata, dict):
-        raise ProfileFormatError(f"Invalid profile metadata in {source_path}: expected a TOML table.")
-    metadata: dict[str, object] = raw_metadata
     unknown_fields = sorted(set(metadata) - _PROFILE_METADATA_FIELDS)
     if unknown_fields:
         raise ProfileFormatError(f"Unknown profile metadata in {source_path}: {', '.join(unknown_fields)}.")
@@ -130,7 +127,6 @@ def _parse_profile_document(source_path: Path) -> ProfileDefinition:
 
 
 def _read_optional_legacy_text(source_path: Path) -> str | None:
-    """Read one optional legacy sidecar file, or None when it is absent."""
     if not source_path.is_file():
         return None
     try:
@@ -140,7 +136,6 @@ def _read_optional_legacy_text(source_path: Path) -> str | None:
 
 
 def _read_legacy_profile(profile_name: str, profile_directory: Path) -> ProfileDefinition:
-    """Read a profile authored in the pre-profile.md sidecar-file layout."""
     instructions = _read_optional_legacy_text(profile_directory / LEGACY_INSTRUCTIONS_FILENAME)
     if not instructions:
         raise ProfileFormatError(f"Profile {profile_name!r} has an empty {LEGACY_INSTRUCTIONS_FILENAME}.")
@@ -168,7 +163,7 @@ def migrate_legacy_profiles(profiles_root: Path) -> list[str]:
     for profile_directory in sorted(profiles_root.iterdir()):
         if (
             not profile_directory.is_dir()
-            or (profile_directory / PROFILE_FILENAME).is_file()
+            or profile_directory_has_definition(profile_directory)
             or not (profile_directory / LEGACY_INSTRUCTIONS_FILENAME).is_file()
         ):
             continue

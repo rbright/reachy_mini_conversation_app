@@ -2,10 +2,10 @@
 
 import time
 import logging
-from typing import TYPE_CHECKING, Any, Dict
+from typing import TYPE_CHECKING, Any
 
 from reachy_mini_conversation_app.tools.core_tools import Tool, ToolDependencies
-from reachy_mini_conversation_app.tools.tool_constants import SystemTool
+from reachy_mini_conversation_app.tools.tool_constants import SYSTEM_TOOL_NAMES
 
 
 if TYPE_CHECKING:
@@ -34,7 +34,7 @@ class TaskStatus(Tool):
         "required": [],
     }
 
-    async def __call__(self, deps: ToolDependencies, **kwargs: Any) -> Dict[str, Any]:
+    async def __call__(self, deps: ToolDependencies, **kwargs: Any) -> dict[str, Any]:
         """Get status of background tools."""
         tool_id: str | None = kwargs.get("tool_id")
         tool_manager: BackgroundToolManager | None = kwargs.get("tool_manager")
@@ -42,14 +42,14 @@ class TaskStatus(Tool):
         if tool_manager is None:
             return {"error": "Tool manager is required."}
 
-        logger.info(f"Tool call: tool_status tool_id={tool_id}")
+        logger.info("Tool call: tool_status tool_id=%s", tool_id)
 
         if tool_id:
             tool = tool_manager.get_tool(tool_id)
             if not tool:
                 return {"error": f"Tool {tool_id} not found."}
 
-            result: Dict[str, Any] = {
+            result: dict[str, Any] = {
                 "tool_id": tool.tool_id,
                 "name": tool.tool_name,
                 "status": tool.status.value,
@@ -70,7 +70,6 @@ class TaskStatus(Tool):
 
             return result
 
-        # Get all running tools
         running = tool_manager.get_running_tools()
         if not running:
             return {
@@ -79,18 +78,17 @@ class TaskStatus(Tool):
             }
 
         tools_info = []
-        for tool in [
-            tool for tool in running if tool.tool_name not in [system_tool.value for system_tool in SystemTool]
-        ]:
+        for tool in running:
+            if tool.tool_name in SYSTEM_TOOL_NAMES:
+                continue
             elapsed = time.monotonic() - tool.started_at
-            tool_info: Dict[str, Any] = {
+            tool_info: dict[str, Any] = {
                 "tool_id": tool.tool_id,
                 "name": tool.tool_name,
                 "status": tool.status.value,
                 "elapsed_seconds": round(elapsed, 1),
             }
 
-            # Add progress if tracking
             if tool.progress is not None:
                 tool_info["progress_percent"] = f"{tool.progress.progress:.0%}"
                 if tool.progress.message:

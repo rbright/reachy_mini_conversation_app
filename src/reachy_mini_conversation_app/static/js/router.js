@@ -15,13 +15,6 @@ export function createRouter(routes, { fallback = "#/", outlet, onRouteChange } 
     return Object.prototype.hasOwnProperty.call(routes, routeName) ? route : fallback;
   }
 
-  function renderRouteError(route, error) {
-    const div = document.createElement("div");
-    div.className = "route-error";
-    div.textContent = `Failed to render ${route}: ${error?.message || error}`;
-    return div;
-  }
-
   function mount(route) {
     leaveGuard = null;
     currentController?.abort();
@@ -51,15 +44,18 @@ export function createRouter(routes, { fallback = "#/", outlet, onRouteChange } 
         onRouteChange?.(resolvedRoute);
       },
     };
-    try {
-      Promise.resolve(routes[routeName](context)).catch((error) => {
-        if (context.signal.aborted) return;
-        console.error("Route handler failed for", route, error);
-        outlet.replaceChildren(renderRouteError(route, error));
-      });
-    } catch (error) {
+    const fail = (error) => {
+      if (controller.signal.aborted) return;
       console.error("Route handler failed for", route, error);
-      outlet.replaceChildren(renderRouteError(route, error));
+      const message = document.createElement("div");
+      message.className = "route-error";
+      message.textContent = `Failed to render ${route}: ${error?.message || error}`;
+      outlet.replaceChildren(message);
+    };
+    try {
+      Promise.resolve(routes[routeName](context)).catch(fail);
+    } catch (error) {
+      fail(error);
     }
     onRouteChange?.(route);
   }

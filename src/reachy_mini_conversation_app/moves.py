@@ -4,7 +4,7 @@ Design overview
 - Primary moves (emotions, dances, goto, breathing) are mutually exclusive and run
   sequentially.
 - There is a single control point to the robot: `ReachyMini.set_target`.
-- The control loop runs near 100 Hz and is phase-aligned via a monotonic clock.
+- The control loop runs near 60 Hz and is phase-aligned via a monotonic clock.
 - Idle behaviour starts an infinite `BreathingMove` after a short inactivity delay
   unless listening is active.
 
@@ -23,14 +23,13 @@ Safety
 - `set_target` errors are rate-limited in logs.
 """
 
-from __future__ import annotations
 import time
 import logging
 import threading
 from queue import Empty, Queue
-from typing import Any, Dict, Tuple
+from typing import Any
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import replace, dataclass
 
 import numpy as np
 from numpy.typing import NDArray
@@ -44,11 +43,10 @@ from reachy_mini_conversation_app.dance_emotion_moves import EmotionQueueMove
 
 logger = logging.getLogger(__name__)
 
-# Configuration constants
 CONTROL_LOOP_FREQUENCY_HZ = 60.0  # Hz - Target frequency for the movement control loop
+_NEUTRAL_ANTENNAS = (-0.1745, 0.1745)  # ~10° offset to reduce shaking
 
-# Type definitions
-FullBodyPose = Tuple[NDArray[np.float32], Tuple[float, float], float]  # (head_pose_4x4, antennas, body_yaw)
+FullBodyPose = tuple[NDArray[np.float32], tuple[float, float], float]  # (head_pose_4x4, antennas, body_yaw)
 
 
 class BreathingMove(Move):  # type: ignore
@@ -57,7 +55,7 @@ class BreathingMove(Move):  # type: ignore
     def __init__(
         self,
         interpolation_start_pose: NDArray[np.float32],
-        interpolation_start_antennas: Tuple[float, float],
+        interpolation_start_antennas: tuple[float, float],
         interpolation_duration: float = 1.0,
     ):
         """Initialize breathing move.
@@ -74,7 +72,7 @@ class BreathingMove(Move):  # type: ignore
 
         # Neutral positions for breathing base
         self.neutral_head_pose = create_head_pose(0, 0, 0, 0, 0, 0, degrees=True)
-        self.neutral_antennas = np.array([-0.1745, 0.1745])  # ~10° offset to reduce shaking
+        self.neutral_antennas = np.array(_NEUTRAL_ANTENNAS)
 
         # Breathing parameters
         self.breathing_z_amplitude = 0.005  # 5mm gentle breathing
@@ -165,7 +163,7 @@ class LoopFrequencyStats:
 
 
 class MovementManager:
-    """Coordinate sequential moves and robot output at 100 Hz.
+    """Coordinate sequential moves and robot output at 60 Hz.
 
     Responsibilities:
     - Own a real-time loop that samples the current primary move (if any) and calls
@@ -178,7 +176,7 @@ class MovementManager:
     Timing:
     - All elapsed-time calculations rely on `time.monotonic()` through `self._now`
       to avoid wall-clock jumps.
-    - The loop attempts 100 Hz
+    - The loop attempts 60 Hz
 
     Concurrency:
     - External threads communicate via `_command_queue` messages.
@@ -216,7 +214,7 @@ class MovementManager:
         self._is_speaking = False
         self._track_anchor: NDArray[np.float64] | None = None
         self._last_commanded_pose: FullBodyPose = clone_full_body_pose(self.state.last_primary_pose)
-        self._listening_antennas: Tuple[float, float] = self._last_commanded_pose[1]
+        self._listening_antennas: tuple[float, float] = self._last_commanded_pose[1]
         self._antenna_unfreeze_blend = 1.0
         self._antenna_blend_duration = 0.4  # seconds to blend back after listening
         self._last_listening_blend_time = self._now()
@@ -226,7 +224,7 @@ class MovementManager:
         self._set_target_err_suppressed = 0
 
         # Cross-thread signalling
-        self._command_queue: "Queue[Tuple[str, Any]]" = Queue()
+        self._command_queue: Queue[tuple[str, Any]] = Queue()
 
         self._shared_state_lock = threading.Lock()
         self._shared_last_activity_time = self.state.last_activity_time
@@ -332,12 +330,10 @@ class MovementManager:
             logger.info("Cleared move queue and stopped current move")
         elif command == "set_moving_state":
             try:
-                duration = float(payload)
+                float(payload)
             except (TypeError, ValueError):
                 logger.warning("Invalid moving state duration: %s", payload)
                 return
-            self.state.update_activity()
-        elif command == "mark_activity":
             self.state.update_activity()
         elif command == "set_listening":
             desired_state = bool(payload)
@@ -413,7 +409,7 @@ class MovementManager:
                 self.state.move_start_time = current_time
                 # Any real move cancels breathing mode flag
                 self._breathing_active = isinstance(self.state.current_move, BreathingMove)
-                logger.debug(f"Starting new move, duration: {self.state.current_move.duration}s")
+                logger.debug("Starting new move, duration: %ss", self.state.current_move.duration)
 
     def _manage_breathing(self, current_time: float) -> None:
         """Manage automatic breathing when idle."""
@@ -464,17 +460,11 @@ class MovementManager:
             if head is None:
                 head = create_head_pose(0, 0, 0, 0, 0, 0, degrees=True)
             if antennas is None:
-                antennas = np.array([-0.1745, 0.1745])  # ~10° offset
+                antennas = np.array(_NEUTRAL_ANTENNAS)
             if body_yaw is None:
                 body_yaw = 0.0
 
-            antennas_tuple = (float(antennas[0]), float(antennas[1]))
-            head_copy = head.copy()
-            primary_full_body_pose = (
-                head_copy,
-                antennas_tuple,
-                float(body_yaw),
-            )
+            primary_full_body_pose = (head.copy(), (float(antennas[0]), float(antennas[1])), float(body_yaw))
 
             self.state.last_primary_pose = clone_full_body_pose(primary_full_body_pose)
         # Otherwise reuse the last primary pose so we avoid jumps between moves
@@ -497,49 +487,37 @@ class MovementManager:
 
         return primary_full_body_pose
 
-    def _update_primary_motion(self, current_time: float) -> None:
-        """Advance queue state and idle behaviours for this tick."""
-        self._manage_move_queue(current_time)
-        self._manage_breathing(current_time)
-
-    def _calculate_blended_antennas(self, target_antennas: Tuple[float, float]) -> Tuple[float, float]:
+    def _calculate_blended_antennas(self, target_antennas: tuple[float, float]) -> tuple[float, float]:
         """Blend target antennas with listening freeze state and update blending."""
         now = self._now()
-        listening = self._is_listening
-        listening_antennas = self._listening_antennas
-        blend = self._antenna_unfreeze_blend
-        blend_duration = self._antenna_blend_duration
-        last_update = self._last_listening_blend_time
+        dt = max(0.0, now - self._last_listening_blend_time)
         self._last_listening_blend_time = now
+        listening_antennas = self._listening_antennas
 
-        if listening:
-            antennas_cmd = listening_antennas
-            new_blend = 0.0
-        else:
-            dt = max(0.0, now - last_update)
-            if blend_duration <= 0:
-                new_blend = 1.0
-            else:
-                new_blend = min(1.0, blend + dt / blend_duration)
-            antennas_cmd = (
-                listening_antennas[0] * (1.0 - new_blend) + target_antennas[0] * new_blend,
-                listening_antennas[1] * (1.0 - new_blend) + target_antennas[1] * new_blend,
-            )
-
-        if listening:
+        if self._is_listening:
             self._antenna_unfreeze_blend = 0.0
+            return listening_antennas
+
+        if self._antenna_blend_duration <= 0:
+            new_blend = 1.0
         else:
-            self._antenna_unfreeze_blend = new_blend
-            if new_blend >= 1.0:
-                self._listening_antennas = (
-                    float(target_antennas[0]),
-                    float(target_antennas[1]),
-                )
+            new_blend = min(1.0, self._antenna_unfreeze_blend + dt / self._antenna_blend_duration)
+        antennas_cmd = (
+            listening_antennas[0] * (1.0 - new_blend) + target_antennas[0] * new_blend,
+            listening_antennas[1] * (1.0 - new_blend) + target_antennas[1] * new_blend,
+        )
+
+        self._antenna_unfreeze_blend = new_blend
+        if new_blend >= 1.0:
+            self._listening_antennas = (
+                float(target_antennas[0]),
+                float(target_antennas[1]),
+            )
 
         return antennas_cmd
 
     def _issue_control_command(
-        self, head: NDArray[np.float32], antennas: Tuple[float, float], body_yaw: float
+        self, head: NDArray[np.float32], antennas: tuple[float, float], body_yaw: float
     ) -> None:
         """Send the pose to the robot with throttled error logging."""
         try:
@@ -559,12 +537,7 @@ class MovementManager:
             with self._status_lock:
                 self._last_commanded_pose = clone_full_body_pose((head, antennas, body_yaw))
 
-    def _update_frequency_stats(
-        self,
-        loop_start: float,
-        prev_loop_start: float,
-        stats: LoopFrequencyStats,
-    ) -> LoopFrequencyStats:
+    def _update_frequency_stats(self, loop_start: float, prev_loop_start: float, stats: LoopFrequencyStats) -> None:
         """Update frequency statistics based on the current loop start time."""
         period = loop_start - prev_loop_start
         if period > 0:
@@ -574,26 +547,17 @@ class MovementManager:
             stats.mean += delta / stats.count
             stats.m2 += delta * (stats.last_freq - stats.mean)
             stats.min_freq = min(stats.min_freq, stats.last_freq)
-        return stats
 
-    def _schedule_next_tick(self, loop_start: float, stats: LoopFrequencyStats) -> Tuple[float, LoopFrequencyStats]:
+    def _schedule_next_tick(self, loop_start: float, stats: LoopFrequencyStats) -> float:
         """Compute sleep time to maintain target frequency and update potential freq."""
         computation_time = self._now() - loop_start
         stats.potential_freq = 1.0 / computation_time if computation_time > 0 else float("inf")
-        sleep_time = max(0.0, self.target_period - computation_time)
-        return sleep_time, stats
+        return max(0.0, self.target_period - computation_time)
 
     def _record_frequency_snapshot(self, stats: LoopFrequencyStats) -> None:
         """Store a thread-safe snapshot of current frequency statistics."""
         with self._status_lock:
-            self._freq_snapshot = LoopFrequencyStats(
-                mean=stats.mean,
-                m2=stats.m2,
-                min_freq=stats.min_freq,
-                count=stats.count,
-                last_freq=stats.last_freq,
-                potential_freq=stats.potential_freq,
-            )
+            self._freq_snapshot = replace(stats)
 
     def _maybe_log_frequency(self, loop_count: int, print_interval_loops: int, stats: LoopFrequencyStats) -> None:
         """Emit frequency telemetry when enough loops have elapsed."""
@@ -614,7 +578,7 @@ class MovementManager:
         stats.reset()
 
     def start(self) -> None:
-        """Start the worker thread that drives the 100 Hz control loop."""
+        """Start the worker thread that drives the 60 Hz control loop."""
         if self._thread is not None and self._thread.is_alive():
             logger.warning("Move worker already running; start() ignored")
             return
@@ -669,46 +633,28 @@ class MovementManager:
 
         # Reset to neutral position using goto_target (same approach as wake_up)
         try:
-            neutral_head_pose = create_head_pose(0, 0, 0, 0, 0, 0, degrees=True)
-            neutral_antennas = [-0.1745, 0.1745]  # ~10° offset to reduce shaking
-            neutral_body_yaw = 0.0
-
-            # Use goto_target directly on the robot
             self.current_robot.goto_target(
-                head=neutral_head_pose,
-                antennas=neutral_antennas,
+                head=create_head_pose(0, 0, 0, 0, 0, 0, degrees=True),
+                antennas=list(_NEUTRAL_ANTENNAS),
                 duration=2.0,
-                body_yaw=neutral_body_yaw,
+                body_yaw=0.0,
             )
-
             logger.info("Reset to neutral position completed")
-
         except Exception as e:
-            logger.error(f"Failed to reset to neutral position: {e}")
+            logger.error("Failed to reset to neutral position: %s", e)
 
-    def get_status(self) -> Dict[str, Any]:
+    def get_status(self) -> dict[str, Any]:
         """Return a lightweight status snapshot for observability."""
         with self._status_lock:
-            pose_snapshot = clone_full_body_pose(self._last_commanded_pose)
-            freq_snapshot = LoopFrequencyStats(
-                mean=self._freq_snapshot.mean,
-                m2=self._freq_snapshot.m2,
-                min_freq=self._freq_snapshot.min_freq,
-                count=self._freq_snapshot.count,
-                last_freq=self._freq_snapshot.last_freq,
-                potential_freq=self._freq_snapshot.potential_freq,
-            )
-
-        head_matrix = pose_snapshot[0].tolist() if pose_snapshot else None
-        antennas = pose_snapshot[1] if pose_snapshot else None
-        body_yaw = pose_snapshot[2] if pose_snapshot else None
+            head, antennas, body_yaw = clone_full_body_pose(self._last_commanded_pose)
+            freq_snapshot = replace(self._freq_snapshot)
 
         return {
             "queue_size": len(self.move_queue),
             "is_listening": self._is_listening,
             "breathing_active": self._breathing_active,
             "last_commanded_pose": {
-                "head": head_matrix,
+                "head": head.tolist(),
                 "antennas": antennas,
                 "body_yaw": body_yaw,
             },
@@ -735,14 +681,15 @@ class MovementManager:
             loop_count += 1
 
             if loop_count > 1:
-                freq_stats = self._update_frequency_stats(loop_start, prev_loop_start, freq_stats)
+                self._update_frequency_stats(loop_start, prev_loop_start, freq_stats)
             prev_loop_start = loop_start
 
             # 1) Poll external commands
             self._poll_signals(loop_start)
 
             # 2) Manage the primary move queue (start new move, end finished move, breathing)
-            self._update_primary_motion(loop_start)
+            self._manage_move_queue(loop_start)
+            self._manage_breathing(loop_start)
 
             # 3) Build the primary full-body pose for this tick
             head, antennas, body_yaw = self._get_primary_pose(loop_start)
@@ -754,7 +701,7 @@ class MovementManager:
             self._issue_control_command(head, antennas_cmd, body_yaw)
 
             # 6) Adaptive sleep to align to next tick, then publish shared state
-            sleep_time, freq_stats = self._schedule_next_tick(loop_start, freq_stats)
+            sleep_time = self._schedule_next_tick(loop_start, freq_stats)
             self._publish_shared_state()
             self._record_frequency_snapshot(freq_stats)
 

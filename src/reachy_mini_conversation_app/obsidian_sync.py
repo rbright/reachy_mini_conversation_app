@@ -51,6 +51,13 @@ class _ObResult:
         """Return whether `ob` reports that no account is signed in."""
         return _NOT_SIGNED_IN_MARKER in self.stderr + self.stdout
 
+    def parse_json(self, command: str) -> object:
+        """Return the JSON that `ob <command>` wrote to stdout."""
+        try:
+            return json.loads(self.stdout)
+        except json.JSONDecodeError as error:
+            raise ObsidianSyncError(f"Unexpected ob {command} output: {error}") from None
+
 
 def configured_vault_path() -> Path | None:
     """Return the configured local vault path; the default is `<instance>/obsidian/<vault>`."""
@@ -125,7 +132,7 @@ async def _run_ob(
         await process.wait()
         raise ObsidianSyncError(f"ob {args[0]} timed out.") from None
     return _ObResult(
-        returncode=process.returncode if process.returncode is not None else -1,
+        returncode=await process.wait(),
         stdout=_redact(stdout.decode(errors="replace"), secrets),
         stderr=_redact(stderr.decode(errors="replace"), secrets),
     )
@@ -264,10 +271,7 @@ class ObsidianSyncSupervisor:
                 self._signed_in = False
                 raise ObsidianSyncError("Not signed in to Obsidian.")
             raise ObsidianSyncError(f"Listing vaults failed: {result.message}")
-        try:
-            payload = json.loads(result.stdout)
-        except json.JSONDecodeError as error:
-            raise ObsidianSyncError(f"Unexpected ob sync-list-remote output: {error}") from None
+        payload = result.parse_json("sync-list-remote")
         self._signed_in = True
         entries = [*payload.get("vaults", []), *payload.get("shared", [])] if isinstance(payload, dict) else []
         return [
@@ -288,10 +292,7 @@ class ObsidianSyncSupervisor:
         local = await _run_ob(executable, ["sync-list-local", "--json"])
         if local.returncode != 0:
             raise ObsidianSyncError(f"ob sync-list-local failed: {local.message}")
-        try:
-            payload = json.loads(local.stdout)
-        except json.JSONDecodeError as error:
-            raise ObsidianSyncError(f"Unexpected ob sync-list-local output: {error}") from None
+        payload = local.parse_json("sync-list-local")
         entries = payload.get("vaults", []) if isinstance(payload, dict) else []
         if not isinstance(entries, list):
             raise ObsidianSyncError("Unexpected ob sync-list-local output: `vaults` is not a list")
@@ -361,10 +362,7 @@ class ObsidianSyncSupervisor:
         secrets = (password,)
         status = await _run_ob(executable, ["sync-status", "--path", str(path), "--json"], secrets=secrets)
         if status.returncode == 0:
-            try:
-                linked = json.loads(status.stdout)
-            except json.JSONDecodeError as error:
-                raise ObsidianSyncError(f"Unexpected ob sync-status output: {error}") from None
+            linked = status.parse_json("sync-status")
             linked_to = {linked.get("vaultId"), linked.get("vaultName")} if isinstance(linked, dict) else set()
             if vault not in linked_to:
                 self.linked = None

@@ -8,7 +8,7 @@ import importlib
 import threading
 import importlib.util
 from types import ModuleType
-from typing import TYPE_CHECKING, Any, Dict, List, Literal, Callable, ClassVar, Sequence, TypedDict
+from typing import TYPE_CHECKING, Any, Literal, Callable, ClassVar, Sequence, TypedDict
 from pathlib import Path
 from dataclasses import field, dataclass
 
@@ -64,7 +64,7 @@ class Tool(abc.ABC):
     Each tool must define:
       - name: str
       - description: str
-      - parameters_schema: Dict[str, Any]  # JSON Schema
+      - parameters_schema: dict[str, Any]  # JSON Schema
 
     Tools may override:
       - needs_response: bool = True  # set False to skip the spoken follow-up after this tool runs
@@ -75,7 +75,7 @@ class Tool(abc.ABC):
 
     name: str
     description: str
-    parameters_schema: Dict[str, Any]
+    parameters_schema: dict[str, Any]
 
     def spec(self) -> ToolSpec:
         """Return the function spec for LLM consumption."""
@@ -87,15 +87,15 @@ class Tool(abc.ABC):
         }
 
     @abc.abstractmethod
-    async def __call__(self, deps: ToolDependencies, **kwargs: Any) -> Dict[str, Any]:
+    async def __call__(self, deps: ToolDependencies, **kwargs: Any) -> dict[str, Any]:
         """Async tool execution entrypoint."""
         raise NotImplementedError
 
 
-ALL_TOOLS: Dict[str, Tool] = {}
+ALL_TOOLS: dict[str, Tool] = {}
 _TOOLS_SIGNATURE: tuple[str, str, str | None, bool, str | None] | None = None
 _TOOLS_INSTANCE_PATH: str | Path | None = None
-_LOADED_TOOL_CLASS_CACHE: Dict[tuple[str, str], List[type[Tool]]] = {}
+_LOADED_TOOL_CLASS_CACHE: dict[tuple[str, str], list[type[Tool]]] = {}
 _REMOTE_TOOL_RETRY_DELAY_S = 0.25
 _TOOLS_LOCK = threading.RLock()
 _EXTERNAL_TOOL_MODULE_NAMESPACE = "reachy_mini_conversation_app._external_tools"
@@ -112,7 +112,7 @@ class RemoteMcpTool(Tool):
         slug: str,
         name: str,
         description: str,
-        parameters_schema: Dict[str, Any],
+        parameters_schema: dict[str, Any],
         client_tool_name: str,
         client: "RemoteMcpToolClient",
     ) -> None:
@@ -125,7 +125,7 @@ class RemoteMcpTool(Tool):
         self._client = client
         self._registry_source = f"space:{slug}:{client_tool_name}"
 
-    async def __call__(self, deps: ToolDependencies, **kwargs: Any) -> Dict[str, Any]:
+    async def __call__(self, deps: ToolDependencies, **kwargs: Any) -> dict[str, Any]:
         """Invoke the underlying remote MCP tool."""
         try:
             result = await self._client.call_tool(self._client_tool_name, kwargs)
@@ -143,7 +143,7 @@ class RemoteMcpTool(Tool):
         return payload
 
 
-_LOADED_REMOTE_TOOL_CACHE: Dict[tuple[str, str], RemoteMcpTool] = {}
+_LOADED_REMOTE_TOOL_CACHE: dict[tuple[str, str], RemoteMcpTool] = {}
 
 
 def _load_module_from_file(module_name: str, file_path: Path) -> ModuleType:
@@ -165,30 +165,19 @@ def _load_module_from_file(module_name: str, file_path: Path) -> ModuleType:
     return module
 
 
-def _format_error(error: Exception) -> str:
-    """Format an exception for logging."""
-    if isinstance(error, FileNotFoundError):
-        return f"Tool file not found: {error}"
-    if isinstance(error, ModuleNotFoundError):
-        return f"Missing dependency: {error}"
-    if isinstance(error, ImportError):
-        return f"Import error: {error}"
-    return f"{type(error).__name__}: {error}"
-
-
 def _normalize_signature_path(value: str | Path | None) -> str | None:
     """Normalize a path-like value for registry invalidation and cache keys."""
     if value is None:
         return None
     try:
         return str(Path(value).expanduser().resolve())
-    except Exception:
+    except (OSError, RuntimeError, ValueError):
         return str(value)
 
 
-def _tool_classes_from_module(module: ModuleType) -> List[type[Tool]]:
+def _tool_classes_from_module(module: ModuleType) -> list[type[Tool]]:
     """Return auto-registerable Tool classes defined directly in module."""
-    tool_classes: List[type[Tool]] = []
+    tool_classes: list[type[Tool]] = []
     seen_class_ids: set[int] = set()
     for value in vars(module).values():
         if not inspect.isclass(value) or value.__module__ != module.__name__:
@@ -210,7 +199,7 @@ def _tool_classes_from_module(module: ModuleType) -> List[type[Tool]]:
 def _load_cached_tool_classes(
     cache_key: tuple[str, str],
     load_module: Callable[[], ModuleType],
-) -> tuple[List[type[Tool]], bool]:
+) -> tuple[list[type[Tool]], bool]:
     """Load tool classes once per source and return whether the cache was reused."""
     cached_classes = _LOADED_TOOL_CLASS_CACHE.get(cache_key)
     if cached_classes is not None:
@@ -227,7 +216,7 @@ def _try_load_tool_classes(
     module_path: str,
     fallback_directory: Path | None,
     file_subpath: str,
-) -> tuple[str, List[type[Tool]], bool]:
+) -> tuple[str, list[type[Tool]], bool]:
     """Try to load tool classes: first via importlib, then from a configured external file."""
     try:
         return (
@@ -251,11 +240,11 @@ def _try_load_tool_classes(
 
 
 def _build_tool_registry(
-    tool_classes: List[type[Tool]],
-    extra_tools: Sequence[Tool] | None = None,
-) -> Dict[str, Tool]:
+    tool_classes: list[type[Tool]],
+    remote_tools: Sequence[RemoteMcpTool],
+) -> dict[str, Tool]:
     """Instantiate tools and fail if duplicate Tool.name values are detected."""
-    unique_classes: List[type[Tool]] = []
+    unique_classes: list[type[Tool]] = []
     seen_class_ids: set[int] = set()
     for cls in tool_classes:
         cls_id = id(cls)
@@ -264,12 +253,10 @@ def _build_tool_registry(
         seen_class_ids.add(cls_id)
         unique_classes.append(cls)
 
-    tool_instances: list[Tool] = []
-    tool_instances.extend(cls() for cls in unique_classes)
-    if extra_tools:
-        tool_instances.extend(extra_tools)
+    tool_instances: list[Tool] = [cls() for cls in unique_classes]
+    tool_instances.extend(remote_tools)
 
-    name_to_sources: Dict[str, List[str]] = {}
+    name_to_sources: dict[str, list[str]] = {}
     for tool in tool_instances:
         source = getattr(tool, "_registry_source", f"{tool.__class__.__module__}.{tool.__class__.__name__}")
         name_to_sources.setdefault(tool.name, []).append(source)
@@ -287,7 +274,7 @@ def _build_tool_registry(
 def _tool_registry_signature(instance_path: str | Path | None) -> tuple[str, str, str | None, bool, str | None]:
     """Return the runtime inputs that determine the active tool registry."""
     return (
-        config.REACHY_MINI_CUSTOM_PROFILE or "default",
+        config.REACHY_MINI_CUSTOM_PROFILE or DEFAULT_PROFILE_NAME,
         _normalize_signature_path(config.PROFILES_DIRECTORY) or "",
         _normalize_signature_path(config.TOOLS_DIRECTORY),
         bool(config.AUTOLOAD_EXTERNAL_TOOLS),
@@ -295,7 +282,6 @@ def _tool_registry_signature(instance_path: str | Path | None) -> tuple[str, str
     )
 
 
-# Registry & specs (dynamic)
 def _read_profile_tool_names(instance_path: str | Path | None) -> list[str]:
     """Read enabled tool names from the active profile's effective toolset."""
     profile = config.REACHY_MINI_CUSTOM_PROFILE or DEFAULT_PROFILE_NAME
@@ -376,9 +362,9 @@ def _resolve_remote_tools(tool_names: list[str], instance_path: str | Path | Non
     return remote_tools
 
 
-def _load_enabled_tools(tool_names: list[str], remote_tool_names: set[str]) -> List[type[Tool]]:
+def _load_enabled_tools(tool_names: list[str], remote_tool_names: set[str]) -> list[type[Tool]]:
     """Load shared and external tools while skipping resolved remote tool IDs."""
-    loaded_tool_classes: List[type[Tool]] = []
+    loaded_tool_classes: list[type[Tool]] = []
 
     for tool_name in tool_names:
         if tool_name in remote_tool_names:
@@ -395,14 +381,14 @@ def _load_enabled_tools(tool_names: list[str], remote_tool_names: set[str]) -> L
             )
             loaded_tool_classes.extend(tool_classes)
             action = "Reused" if reused_cache else "Loaded"
-            if source == "file":
-                logger.info("✓ %s external tool: %s", action, tool_name)
-            else:
-                logger.info("✓ %s core tool: %s", action, tool_name)
+            kind = "external" if source == "file" else "core"
+            logger.info("✓ %s %s tool: %s", action, kind, tool_name)
         except (ModuleNotFoundError, FileNotFoundError):
             logger.warning("⚠️ Tool '%s' not found in shared or external tools", tool_name)
         except Exception as e:
-            logger.error("❌ Failed to load tool '%s': %s", tool_name, _format_error(e))
+            # Not-found errors are handled above, so an ImportError here comes from inside the tool module.
+            reason = f"Import error: {e}" if isinstance(e, ImportError) else f"{type(e).__name__}: {e}"
+            logger.error("❌ Failed to load tool '%s': %s", tool_name, reason)
             logger.error("  Module path: %s", shared_module_path)
 
     return loaded_tool_classes
@@ -436,10 +422,7 @@ def initialize_tools(instance_path: str | Path | None = None, *, force: bool = F
         remote_tools = _resolve_remote_tools(tool_names, effective_instance_path)
         remote_tool_names = {tool.name for tool in remote_tools}
         loaded_tool_classes = _load_enabled_tools(tool_names, remote_tool_names)
-        tools = _build_tool_registry(
-            loaded_tool_classes,
-            extra_tools=remote_tools,
-        )
+        tools = _build_tool_registry(loaded_tool_classes, remote_tools)
         ALL_TOOLS = tools
         _TOOLS_SIGNATURE = signature
 
@@ -462,8 +445,7 @@ def get_tools() -> dict[str, Tool]:
         return dict(ALL_TOOLS)
 
 
-# Dispatcher
-def _safe_load_obj(args_json: str) -> Dict[str, Any]:
+def _safe_load_obj(args_json: str) -> dict[str, Any]:
     try:
         parsed_args = json.loads(args_json or "{}")
         return parsed_args if isinstance(parsed_args, dict) else {}
@@ -472,7 +454,7 @@ def _safe_load_obj(args_json: str) -> Dict[str, Any]:
         return {}
 
 
-async def _dispatch_tool_call(tool_name: str, args: Dict[str, Any], deps: ToolDependencies) -> Dict[str, Any]:
+async def _dispatch_tool_call(tool_name: str, args: dict[str, Any], deps: ToolDependencies) -> dict[str, Any]:
     tool = get_tools().get(tool_name)
     if not tool:
         return {"error": f"unknown tool: {tool_name}"}
@@ -487,14 +469,14 @@ async def _dispatch_tool_call(tool_name: str, args: Dict[str, Any], deps: ToolDe
         return {"error": msg}
 
 
-async def dispatch_tool_call(tool_name: str, args_json: str, deps: ToolDependencies) -> Dict[str, Any]:
+async def dispatch_tool_call(tool_name: str, args_json: str, deps: ToolDependencies) -> dict[str, Any]:
     """Dispatch a tool call by name with JSON args and dependencies."""
     return await _dispatch_tool_call(tool_name, _safe_load_obj(args_json), deps)
 
 
 async def dispatch_tool_call_with_manager(
     tool_name: str, args_json: str, deps: ToolDependencies, tool_manager: "BackgroundToolManager"
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Dispatch a tool call, injecting a BackgroundToolManager into the args."""
     args = _safe_load_obj(args_json)
     args["tool_manager"] = tool_manager

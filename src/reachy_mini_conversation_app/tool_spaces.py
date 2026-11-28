@@ -10,7 +10,7 @@ import threading
 from typing import Any
 from pathlib import Path
 from collections import Counter
-from dataclasses import field, asdict, dataclass
+from dataclasses import field, asdict, fields, dataclass
 from urllib.parse import urlsplit
 from collections.abc import Sequence
 
@@ -249,21 +249,18 @@ def get_installed_tool_spaces_path(instance_path: str | Path | None) -> Path:
     return TERMINAL_EXTERNAL_CONTENT_DIRECTORY / INSTALLED_TOOL_SPACES_FILENAME
 
 
-def _preinstalled_installed_spaces() -> list[InstalledToolSpace]:
-    """Build the bundled Pollen Spaces as manifest entries with their tools cached from static specs."""
-    spaces: list[InstalledToolSpace] = []
-    for slug, remote_specs in PREINSTALLED_TOOL_SPACE_SPECS.items():
-        alias = normalize_space_alias(slug)
-        spaces.append(
-            InstalledToolSpace(
-                slug=slug,
-                alias=alias,
-                mcp_url=f"https://{slug.replace('/', '-')}.hf.space/gradio_api/mcp/",
-                private=False,
-                tools=_build_installed_tool_space_tools(slug=slug, alias=alias, remote_specs=list(remote_specs)),
-            )
-        )
-    return spaces
+def _preinstalled_space(slug: str) -> InstalledToolSpace:
+    """Build one bundled Pollen Space as a manifest entry with its tools cached from static specs."""
+    alias = normalize_space_alias(slug)
+    return InstalledToolSpace(
+        slug=slug,
+        alias=alias,
+        mcp_url=f"https://{slug.replace('/', '-')}.hf.space/gradio_api/mcp/",
+        private=False,
+        tools=_build_installed_tool_space_tools(
+            slug=slug, alias=alias, remote_specs=PREINSTALLED_TOOL_SPACE_SPECS[slug]
+        ),
+    )
 
 
 def read_installed_tool_spaces(instance_path: str | Path | None) -> InstalledToolSpacesManifest:
@@ -271,7 +268,9 @@ def read_installed_tool_spaces(instance_path: str | Path | None) -> InstalledToo
     with _MANIFEST_LOCK:
         manifest_path = get_installed_tool_spaces_path(instance_path)
         if not manifest_path.exists():
-            return InstalledToolSpacesManifest(spaces=_preinstalled_installed_spaces())
+            return InstalledToolSpacesManifest(
+                spaces=[_preinstalled_space(slug) for slug in PREINSTALLED_TOOL_SPACE_SPECS]
+            )
 
         try:
             payload = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -282,7 +281,7 @@ def read_installed_tool_spaces(instance_path: str | Path | None) -> InstalledToo
         raise RuntimeError(f"Invalid installed tool spaces payload in {manifest_path}: expected a JSON object.")
 
     version = payload.get("version")
-    if not isinstance(version, int) or isinstance(version, bool) or version not in {2, INSTALLED_TOOL_SPACES_VERSION}:
+    if not isinstance(version, int) or version not in {2, INSTALLED_TOOL_SPACES_VERSION}:
         raise RuntimeError(
             f"Unsupported installed tool spaces version in {manifest_path}: expected {INSTALLED_TOOL_SPACES_VERSION}."
         )
@@ -319,23 +318,23 @@ def read_installed_tool_spaces(instance_path: str | Path | None) -> InstalledToo
     spaces: list[InstalledToolSpace] = []
     seen_slugs: set[str] = set()
     seen_aliases: set[str] = set()
+    expected_space_fields = {space_field.name for space_field in fields(InstalledToolSpace)}
+    expected_tool_fields = {tool_field.name for tool_field in fields(InstalledToolSpaceTool)}
     for raw_space in raw_spaces:
         if not isinstance(raw_space, dict):
             raise RuntimeError(f"Invalid installed tool spaces entry in {manifest_path}: expected an object.")
 
-        expected_space_fields = {"slug", "alias", "mcp_url", "private", "tools"}
         if set(raw_space) != expected_space_fields:
             invalid_fields = sorted(set(raw_space) ^ expected_space_fields)
             raise RuntimeError(
                 f"Invalid installed tool spaces entry in {manifest_path}: missing or unknown fields: "
                 f"{', '.join(invalid_fields)}."
             )
-        if not isinstance(raw_space["slug"], str):
-            raise RuntimeError(f"Invalid installed tool spaces entry in {manifest_path}: 'slug' must be a string.")
-        if not isinstance(raw_space["alias"], str):
-            raise RuntimeError(f"Invalid installed tool spaces entry in {manifest_path}: 'alias' must be a string.")
-        if not isinstance(raw_space["mcp_url"], str):
-            raise RuntimeError(f"Invalid installed tool spaces entry in {manifest_path}: 'mcp_url' must be a string.")
+        for field_name in ("slug", "alias", "mcp_url"):
+            if not isinstance(raw_space[field_name], str):
+                raise RuntimeError(
+                    f"Invalid installed tool spaces entry in {manifest_path}: '{field_name}' must be a string."
+                )
         if not isinstance(raw_space["private"], bool):
             raise RuntimeError(f"Invalid installed tool spaces entry in {manifest_path}: 'private' must be a boolean.")
         if not isinstance(raw_space["tools"], list):
@@ -361,13 +360,6 @@ def read_installed_tool_spaces(instance_path: str | Path | None) -> InstalledToo
                 raise RuntimeError(
                     f"Invalid cached tool for installed Space '{slug}' in {manifest_path}: expected an object."
                 )
-            expected_tool_fields = {
-                "local_name",
-                "client_tool_name",
-                "remote_name",
-                "description",
-                "parameters_schema",
-            }
             if set(raw_tool) != expected_tool_fields:
                 invalid_fields = sorted(set(raw_tool) ^ expected_tool_fields)
                 raise RuntimeError(
@@ -410,7 +402,7 @@ def read_installed_tool_spaces(instance_path: str | Path | None) -> InstalledToo
                     client_tool_name=client_tool_name,
                     remote_name=remote_name,
                     description=raw_tool["description"],
-                    parameters_schema=dict(raw_tool["parameters_schema"]),
+                    parameters_schema=raw_tool["parameters_schema"],
                 )
             )
         seen_slugs.add(slug)
@@ -424,17 +416,12 @@ def read_installed_tool_spaces(instance_path: str | Path | None) -> InstalledToo
                 tools=cached_tools,
             )
         )
-    known_bundled_slugs = set(bundled_space_slugs)
-    new_bundled_space_slugs: list[str] = []
-    for bundled_space in _preinstalled_installed_spaces():
-        if bundled_space.slug not in known_bundled_slugs:
-            new_bundled_space_slugs.append(bundled_space.slug)
-            if bundled_space.slug not in seen_slugs:
-                spaces.append(bundled_space)
+    new_bundled_space_slugs = [slug for slug in PREINSTALLED_TOOL_SPACE_SPECS if slug not in bundled_space_slugs]
+    spaces.extend(_preinstalled_space(slug) for slug in new_bundled_space_slugs if slug not in seen_slugs)
 
     return InstalledToolSpacesManifest(
         spaces=spaces,
-        bundled_space_slugs=list(dict.fromkeys([*bundled_space_slugs, *PREINSTALLED_TOOL_SPACE_SPECS])),
+        bundled_space_slugs=[*bundled_space_slugs, *new_bundled_space_slugs],
         new_bundled_space_slugs=new_bundled_space_slugs,
     )
 
@@ -554,16 +541,9 @@ def _normalize_segment(value: str) -> str:
 
 
 def _clean_space_tool_name(slug: str, alias: str, remote_name: str) -> str:
-    normalized_remote_name = _normalize_segment(remote_name)
     space_name = slug.split("/", maxsplit=1)[1]
-    normalized_space_name = _normalize_segment(space_name)
-    redundant_prefix = f"{normalized_space_name}_"
-
-    if normalized_remote_name.startswith(redundant_prefix):
-        cleaned_name = normalized_remote_name[len(redundant_prefix) :]
-        if cleaned_name:
-            return f"{alias}__{cleaned_name}"
-    return f"{alias}__{normalized_remote_name}"
+    redundant_prefix = f"{_normalize_segment(space_name)}_"
+    return f"{alias}__{_normalize_segment(remote_name).removeprefix(redundant_prefix)}"
 
 
 def _build_installed_tool_space_tools(
@@ -593,23 +573,12 @@ def _build_installed_tool_space_tools(
 def _build_space_mcp_url(space_info: SpaceInfo, slug: str) -> str:
     host = (space_info.host or "").strip()
     if host:
-        if host.startswith("http://") or host.startswith("https://"):
+        if host.startswith(("http://", "https://")):
             return f"{host.rstrip('/')}/gradio_api/mcp/"
         return f"https://{host.rstrip('/')}/gradio_api/mcp/"
 
-    subdomain = (space_info.subdomain or "").strip()
-    if subdomain:
-        return f"https://{subdomain}.hf.space/gradio_api/mcp/"
-
-    slug_host = slug.replace("/", "-")
-    return f"https://{slug_host}.hf.space/gradio_api/mcp/"
-
-
-def _validate_space_info(slug: str, space_info: SpaceInfo) -> None:
-    if bool(space_info.disabled):
-        raise RuntimeError(f"Space '{slug}' is disabled and cannot be installed.")
-    if (space_info.sdk or "").strip().lower() != "gradio":
-        raise RuntimeError(f"Space '{slug}' is not a Gradio Space and cannot expose the standard MCP endpoint.")
+    subdomain = (space_info.subdomain or "").strip() or slug.replace("/", "-")
+    return f"https://{subdomain}.hf.space/gradio_api/mcp/"
 
 
 def build_remote_client(
@@ -622,7 +591,7 @@ def build_remote_client(
     """Build an MCP client for an installed Space, sending the HF token only to private Spaces."""
     validated_mcp_url = validate_space_mcp_url(mcp_url)
     token = (config.HF_TOKEN or get_token()) if private else None
-    headers = {"Authorization": f"Bearer {token}"} if private and token else {}
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
     return RemoteMcpToolClient(
         RemoteMcpServerConfig(
             alias=alias,
@@ -661,7 +630,12 @@ async def resolve_tool_space(slug: str) -> InstalledToolSpace:
         raise RuntimeError(
             f"Space '{validated_slug}' was not found, or the current Hugging Face token cannot access it."
         ) from exc
-    _validate_space_info(validated_slug, space_info)
+    if space_info.disabled:
+        raise RuntimeError(f"Space '{validated_slug}' is disabled and cannot be installed.")
+    if (space_info.sdk or "").strip().lower() != "gradio":
+        raise RuntimeError(
+            f"Space '{validated_slug}' is not a Gradio Space and cannot expose the standard MCP endpoint."
+        )
 
     mcp_url = _build_space_mcp_url(space_info, validated_slug)
     private = bool(space_info.private)
@@ -696,11 +670,11 @@ def install_tool_space(
     profile: str | None = None,
 ) -> ToolSpaceInstallResult:
     """Install or refresh one Space and optionally enable its tools in a profile."""
-    target_profile = profile or config.REACHY_MINI_CUSTOM_PROFILE or "default"
+    target_profile = profile or config.REACHY_MINI_CUSTOM_PROFILE or DEFAULT_PROFILE_NAME
     if not install_only:
         try:
             read_profile_tool_names(target_profile, instance_path)
-        except (OSError, RuntimeError, UnicodeError, ValueError) as exc:
+        except (OSError, RuntimeError, ValueError) as exc:
             raise ToolSpaceProfileUpdateError(
                 f"Cannot enable Space tools in profile '{target_profile}': {exc}"
             ) from exc
@@ -724,7 +698,6 @@ def install_tool_space(
 
         refreshed = any(installed_space.slug == resolved_space.slug for installed_space in manifest.spaces)
         updated_manifest = InstalledToolSpacesManifest(
-            version=INSTALLED_TOOL_SPACES_VERSION,
             spaces=sorted(
                 [space for space in manifest.spaces if space.slug != resolved_space.slug] + [resolved_space],
                 key=lambda space: space.slug,
@@ -741,7 +714,7 @@ def install_tool_space(
             tool_ids = [tool.local_name for tool in resolved_space.tools]
             try:
                 added_tool_ids = enable_profile_tools(target_profile, tool_ids, instance_path)
-            except (OSError, RuntimeError, UnicodeError, ValueError) as exc:
+            except (OSError, RuntimeError, ValueError) as exc:
                 raise ToolSpaceProfileUpdateError(
                     f"Could not enable '{resolved_space.slug}' in profile '{target_profile}': {exc}"
                 ) from exc
@@ -749,11 +722,11 @@ def install_tool_space(
 
         try:
             manifest_path = write_installed_tool_spaces(instance_path, updated_manifest)
-        except (OSError, RuntimeError, UnicodeError, ValueError) as exc:
+        except (OSError, RuntimeError, ValueError) as exc:
             if not install_only:
                 try:
                     _restore_profile_toolsets(instance_path, profile_toolsets, profile_settings_existed)
-                except (OSError, RuntimeError, UnicodeError, ValueError) as rollback_exc:
+                except (OSError, RuntimeError, ValueError) as rollback_exc:
                     raise ToolSpaceProfileUpdateError(
                         f"Could not persist '{resolved_space.slug}', and restoring the previous profile tool "
                         f"settings also failed: {rollback_exc}"
@@ -783,7 +756,6 @@ def remove_tool_space(
             raise ToolSpaceNotInstalledError(f"Space not installed: {validated_slug}")
 
         updated_manifest = InstalledToolSpacesManifest(
-            version=INSTALLED_TOOL_SPACES_VERSION,
             spaces=[space for space in manifest.spaces if space.slug != validated_slug],
             bundled_space_slugs=manifest.bundled_space_slugs,
         )
@@ -800,16 +772,16 @@ def remove_tool_space(
                 f"{removed_space.alias}__",
                 instance_path,
             )
-        except (OSError, RuntimeError, UnicodeError, ValueError) as exc:
+        except (OSError, RuntimeError, ValueError) as exc:
             raise ToolSpaceProfileUpdateError(
                 f"Could not remove '{validated_slug}' because its profile tool access could not be updated: {exc}"
             ) from exc
         try:
             write_installed_tool_spaces(instance_path, updated_manifest)
-        except (OSError, RuntimeError, UnicodeError, ValueError) as exc:
+        except (OSError, RuntimeError, ValueError) as exc:
             try:
                 _restore_profile_toolsets(instance_path, profile_toolsets, profile_settings_existed)
-            except (OSError, RuntimeError, UnicodeError, ValueError) as rollback_exc:
+            except (OSError, RuntimeError, ValueError) as rollback_exc:
                 raise ToolSpaceProfileUpdateError(
                     f"Could not persist removal of '{validated_slug}', and restoring the previous profile tool "
                     f"settings also failed: {rollback_exc}"
@@ -831,7 +803,7 @@ def format_space_tool_listing(space: InstalledToolSpace) -> str:
     ]
     if space.tools:
         lines.append("  Tools:")
-        lines.extend([f"    - {tool.local_name}" for tool in space.tools])
+        lines.extend(f"    - {tool.local_name}" for tool in space.tools)
     else:
         lines.append("  Tools: none discovered")
     return "\n".join(lines)
@@ -839,17 +811,14 @@ def format_space_tool_listing(space: InstalledToolSpace) -> str:
 
 def handle_tool_spaces_command(args: argparse.Namespace, *, instance_path: str | Path | None = None) -> int:
     """Handle tool-spaces subcommands from the main CLI."""
-    command = getattr(args, "tool_spaces_command", None)
+    command = args.tool_spaces_command
     if command == "add":
-        target_profile = args.profile
-        if target_profile is None and not args.install_only:
-            target_profile = config.REACHY_MINI_CUSTOM_PROFILE or "default"
         try:
             install_result = install_tool_space(
                 args.space_slug,
                 instance_path,
                 install_only=args.install_only,
-                profile=target_profile,
+                profile=args.profile,
             )
         except (RuntimeError, ValueError) as exc:
             logger.error("%s", exc)

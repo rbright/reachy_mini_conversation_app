@@ -82,12 +82,7 @@ def _run_cli(monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> int:
     return int(exc.value.code)
 
 
-def test_tool_spaces_add_list_remove_round_trip(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The CLI should install, list, and remove a public Space tool source cleanly."""
-    monkeypatch.chdir(tmp_path)
+def _mock_public_space_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "reachy_mini_conversation_app.tool_spaces.HfApi.space_info",
         lambda self, slug, **kwargs: _mock_public_space_info(slug),
@@ -96,6 +91,15 @@ def test_tool_spaces_add_list_remove_round_trip(
         "reachy_mini_conversation_app.tool_spaces.RemoteMcpToolClient.list_tool_specs",
         _mock_list_tool_specs,
     )
+
+
+def test_tool_spaces_add_list_remove_round_trip(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The CLI should install, list, and remove a public Space tool source cleanly."""
+    monkeypatch.chdir(tmp_path)
+    _mock_public_space_discovery(monkeypatch)
 
     assert (
         _run_cli(
@@ -231,14 +235,7 @@ def test_tool_spaces_manifest_uses_instance_path_when_provided(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Managed instance paths should store the manifest beside other instance-local state."""
-    monkeypatch.setattr(
-        "reachy_mini_conversation_app.tool_spaces.HfApi.space_info",
-        lambda self, slug, **kwargs: _mock_public_space_info(slug),
-    )
-    monkeypatch.setattr(
-        "reachy_mini_conversation_app.tool_spaces.RemoteMcpToolClient.list_tool_specs",
-        _mock_list_tool_specs,
-    )
+    _mock_public_space_discovery(monkeypatch)
 
     args = Namespace(
         tool_spaces_command="add",
@@ -304,14 +301,7 @@ def test_tool_spaces_add_rejects_alias_collision(
 ) -> None:
     """A second Space whose slug normalizes to the same alias must be rejected."""
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(
-        "reachy_mini_conversation_app.tool_spaces.HfApi.space_info",
-        lambda self, slug, **kwargs: _mock_public_space_info(slug),
-    )
-    monkeypatch.setattr(
-        "reachy_mini_conversation_app.tool_spaces.RemoteMcpToolClient.list_tool_specs",
-        _mock_list_tool_specs,
-    )
+    _mock_public_space_discovery(monkeypatch)
 
     assert (
         _run_cli(
@@ -340,14 +330,7 @@ def _setup_profile(tmp_path: Path, profile: str, default_tools: list[str] | None
 def _mock_add(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("reachy_mini_conversation_app.profile_store.DEFAULT_PROFILES_DIRECTORY", tmp_path)
-    monkeypatch.setattr(
-        "reachy_mini_conversation_app.tool_spaces.HfApi.space_info",
-        lambda self, slug, **kwargs: _mock_public_space_info(slug),
-    )
-    monkeypatch.setattr(
-        "reachy_mini_conversation_app.tool_spaces.RemoteMcpToolClient.list_tool_specs",
-        _mock_list_tool_specs,
-    )
+    _mock_public_space_discovery(monkeypatch)
 
 
 def test_tool_spaces_add_enables_in_active_profile_by_default(

@@ -1,11 +1,10 @@
 """Helpers for persisting UI-selected startup profile and voice settings."""
 
-from __future__ import annotations
 import os
 import json
 import logging
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 
 logger = logging.getLogger(__name__)
@@ -74,17 +73,10 @@ def write_startup_settings(
         voice=_normalize_optional_text(voice),
     )
     if settings.profile is None and settings.voice is None:
-        try:
-            settings_path.unlink()
-        except FileNotFoundError:
-            return
+        settings_path.unlink(missing_ok=True)
         return
 
-    payload: dict[str, str] = {}
-    if settings.profile is not None:
-        payload["profile"] = settings.profile
-    if settings.voice is not None:
-        payload["voice"] = settings.voice
+    payload = {name: value for name, value in asdict(settings).items() if value is not None}
 
     settings_path.write_text(f"{json.dumps(payload, indent=2, sort_keys=True)}\n", encoding="utf-8")
 

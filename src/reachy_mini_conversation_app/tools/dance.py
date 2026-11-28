@@ -1,6 +1,6 @@
 import random
 import logging
-from typing import Any, Dict
+from typing import Any
 
 from reachy_mini_conversation_app.tools.core_tools import Tool, ToolDependencies
 
@@ -14,24 +14,20 @@ try:
 
     DANCE_AVAILABLE = True
 except ImportError as e:
-    logger.warning(f"Dance library not available: {e}")
+    logger.warning("Dance library not available: %s", e)
     AVAILABLE_MOVES = {}
     DANCE_AVAILABLE = False
 
 
 def get_available_dances_and_descriptions() -> str:
     """Get formatted list of available dances with descriptions."""
-    if not DANCE_AVAILABLE:
+    if not DANCE_AVAILABLE or not AVAILABLE_MOVES:
         return "Moves not available."
 
-    if not AVAILABLE_MOVES:
-        return "Moves not available."
-
-    output = ""
-    for move_name, (func, params, metadata) in AVAILABLE_MOVES.items():
-        description = metadata.get("description", "No description available.")
-        output += f"{move_name}: {description}\n"
-    return output
+    return "".join(
+        f"{move_name}: {metadata.get('description', 'No description available.')}\n"
+        for move_name, (_, _, metadata) in AVAILABLE_MOVES.items()
+    )
 
 
 class Dance(Tool):
@@ -45,7 +41,7 @@ class Dance(Tool):
         "properties": {
             "move": {
                 "type": "string",
-                "enum": list(AVAILABLE_MOVES.keys() if DANCE_AVAILABLE else []),
+                "enum": list(AVAILABLE_MOVES),
                 "description": f"""Name of the moves and their descriptions; omit for random.
                                 Here is a list of the available moves, you MUST only choose from these: \n
                                 {get_available_dances_and_descriptions()}
@@ -59,7 +55,7 @@ class Dance(Tool):
         "required": [],
     }
 
-    async def __call__(self, deps: ToolDependencies, **kwargs: Any) -> Dict[str, Any]:
+    async def __call__(self, deps: ToolDependencies, **kwargs: Any) -> dict[str, Any]:
         """Play a named or random dance move once (or repeat). Non-blocking."""
         if not DANCE_AVAILABLE:
             return {"error": "Dance system not available"}
@@ -78,9 +74,7 @@ class Dance(Tool):
         if move_name not in AVAILABLE_MOVES:
             return {"error": f"Unknown dance move '{move_name}'. Available: {list(AVAILABLE_MOVES.keys())}"}
 
-        movement_manager = deps.movement_manager
         for _ in range(repeat):
-            dance_move = DanceQueueMove(move_name)
-            movement_manager.queue_move(dance_move)
+            deps.movement_manager.queue_move(DanceQueueMove(move_name))
 
         return {"status": "queued", "move": move_name, "repeat": repeat}

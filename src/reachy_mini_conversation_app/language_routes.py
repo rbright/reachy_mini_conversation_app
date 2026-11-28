@@ -1,7 +1,6 @@
 """JSON-RPC methods for the speech transcription language."""
 
 import re
-import logging
 from typing import Any
 from collections.abc import Callable
 
@@ -10,8 +9,6 @@ from reachy_mini.apps.jsonrpc_server import JsonRpcServer
 from reachy_mini_conversation_app.config import config
 from reachy_mini_conversation_app.settings_auth import SettingsRpcServer
 
-
-logger = logging.getLogger(__name__)
 
 # Transcription takes ISO-639-1 codes ("en", "fr") or "auto"; a region suffix is not one.
 _LANGUAGE_RE = re.compile(r"^(?:[a-z]{2}|auto)$", re.IGNORECASE)

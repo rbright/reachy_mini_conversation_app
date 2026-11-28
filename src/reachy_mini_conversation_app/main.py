@@ -1,6 +1,5 @@
 """Entrypoint for the Reachy Mini conversation app."""
 
-from __future__ import annotations
 import os
 import sys
 import time
@@ -9,10 +8,11 @@ import asyncio
 import logging
 import argparse
 import threading
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 from pathlib import Path
 from collections.abc import Callable, Awaitable
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Response
 
 from reachy_mini import ReachyMini, ReachyMiniApp
@@ -64,7 +64,7 @@ def start_import_warmup() -> threading.Thread:
 
 def _start_inactivity_timeout_thread(
     timeout_minutes: float,
-    stream_manager: LocalStream,
+    stream_manager: "LocalStream",
     logger: logging.Logger,
     app_stop_event: threading.Event | None,
     go_to_sleep: Callable[[], dict[str, Any]] | None = None,
@@ -128,10 +128,10 @@ def main() -> None:
 
 def run(
     args: argparse.Namespace,
-    robot: ReachyMini = None,
-    app_stop_event: Optional[threading.Event] = None,
-    settings_app: Optional[FastAPI] = None,
-    instance_path: Optional[str] = None,
+    robot: ReachyMini | None = None,
+    app_stop_event: threading.Event | None = None,
+    settings_app: FastAPI | None = None,
+    instance_path: str | None = None,
 ) -> None:
     """Run the Reachy Mini conversation app."""
     start_import_warmup()
@@ -162,8 +162,6 @@ def run(
 
     if instance_path is not None:
         try:
-            from dotenv import load_dotenv
-
             env_path = Path(instance_path) / ".env"
             if env_path.exists():
                 load_dotenv(dotenv_path=str(env_path), override=True)
@@ -213,17 +211,17 @@ def run(
             robot = ReachyMini(**robot_kwargs)
 
         except TimeoutError as e:
-            logger.error(f"Connection timeout: Failed to connect to Reachy Mini daemon. Details: {e}")
+            logger.error("Connection timeout: Failed to connect to Reachy Mini daemon. Details: %s", e)
             log_connection_troubleshooting(logger, args.robot_name)
             sys.exit(1)
 
         except ConnectionError as e:
-            logger.error(f"Connection failed: Unable to establish connection to Reachy Mini. Details: {e}")
+            logger.error("Connection failed: Unable to establish connection to Reachy Mini. Details: %s", e)
             log_connection_troubleshooting(logger, args.robot_name)
             sys.exit(1)
 
         except Exception as e:
-            logger.error(f"Unexpected error during robot initialization: {type(e).__name__}: {e}")
+            logger.error("Unexpected error during robot initialization: %s: %s", type(e).__name__, e)
             logger.error("Please check your configuration and try again.")
             sys.exit(1)
 
@@ -257,7 +255,7 @@ def run(
         camera_enabled=not args.no_camera and config.CAMERA_ENABLED,
     )
 
-    def build_handler(startup_voice: Optional[str] = None) -> ConversationHandler:
+    def build_handler(startup_voice: str | None = None) -> ConversationHandler:
         """Build a realtime handler for the current provider configuration."""
         if get_backend_choice() == OPENAI_BACKEND:
             from reachy_mini_conversation_app.openai_realtime import OpenAIRealtimeHandler
@@ -286,7 +284,6 @@ def run(
 
     handler = build_handler(startup_settings.voice)
 
-    stream_manager: LocalStream | None = None
     own_ui_server = None
 
     effective_settings_app = settings_app
@@ -412,7 +409,7 @@ def run(
         try:
             stream_manager.close()
         except Exception as e:
-            logger.error(f"Error while closing stream manager: {e}")
+            logger.error("Error while closing stream manager: %s", e)
 
     if app_stop_event:
         threading.Thread(target=poll_stop_event, daemon=True).start()
@@ -440,13 +437,13 @@ def run(
         try:
             robot.disable_wobbling()
         except Exception as e:
-            logger.debug(f"Error disabling wobbling during shutdown: {e}")
+            logger.debug("Error disabling wobbling during shutdown: %s", e)
 
         # Ensure media is explicitly closed before disconnecting
         try:
             robot.media.close()
         except Exception as e:
-            logger.debug(f"Error closing media during shutdown: {e}")
+            logger.debug("Error closing media during shutdown: %s", e)
 
         # prevent connection to keep alive some threads
         robot.client.disconnect()

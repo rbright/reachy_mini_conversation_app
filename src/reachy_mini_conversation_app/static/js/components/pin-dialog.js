@@ -4,7 +4,8 @@
 
 import { h } from "../ui.js";
 
-export const MIN_SETTINGS_PIN_LENGTH = 6;
+// Mirrors MIN_SETTINGS_PIN_LENGTH in settings_auth.py, which enforces it.
+const MIN_SETTINGS_PIN_LENGTH = 6;
 
 export function askSettingsPin({ create = false, retry = false } = {}) {
   return new Promise((resolve) => {
