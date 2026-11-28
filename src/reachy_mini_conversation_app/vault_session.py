@@ -264,8 +264,6 @@ class VaultSession:
                 profile = canonical_profile_name(config.REACHY_MINI_CUSTOM_PROFILE)
                 if self.started_at is not None:
                     if self.profile == profile:
-                        # The session keeps its transcript. Its context must describe the tools the model has now,
-                        # and it loads once the vault is available.
                         tools_changed = _has_vault_tools(profile, instance_path) != self.vault_tools
                         if tools_changed or (not self.context and current_vault_path() is not None):
                             self._load_context(instance_path)
