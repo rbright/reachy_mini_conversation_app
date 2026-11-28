@@ -102,9 +102,9 @@ source .venv/bin/activate
 pip install -e .
 ```
 
-Install dev dependencies:
+Install dev dependencies (pip 25.1 or later):
 ```bash
-pip install -e .[dev]                   # Development tools
+pip install --group dev                 # Development tools
 ```
 
 </details>

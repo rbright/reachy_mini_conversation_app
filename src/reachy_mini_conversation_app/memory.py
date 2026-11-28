@@ -1,4 +1,3 @@
-from __future__ import annotations
 import os
 import json
 import time
@@ -60,19 +59,19 @@ def memory_path_for_instance(instance_path: str | Path | None = None) -> Path:
 
 def normalize_memory_text(text: str) -> str:
     """Collapse whitespace and enforce the fact length cap."""
-    normalized = " ".join(text.split()).strip()
+    normalized = " ".join(text.split())
     if len(normalized) <= MAX_FACT_CHARS:
         return normalized
     return f"{normalized[: MAX_FACT_CHARS - 3]}..."
 
 
-def _make_id() -> str:
-    suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
-    return f"m_{int(time.time() * 1000)}_{suffix}"
-
-
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _make_id() -> str:
+    suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
+    return f"m_{_now_ms()}_{suffix}"
 
 
 def _fact_from_json(value: object) -> MemoryFact | None:
@@ -83,11 +82,7 @@ def _fact_from_json(value: object) -> MemoryFact | None:
     text = value.get("text")
     created_at = value.get("createdAt")
 
-    if not isinstance(fact_id, str):
-        return None
-    if not isinstance(text, str):
-        return None
-    if not isinstance(created_at, (int, float)):
+    if not isinstance(fact_id, str) or not isinstance(text, str) or not isinstance(created_at, (int, float)):
         return None
 
     normalized = normalize_memory_text(text)
@@ -119,11 +114,7 @@ def _read_memory_file(path: Path) -> list[MemoryFact]:
     if not isinstance(facts_value, list):
         return []
 
-    facts: list[MemoryFact] = []
-    for item in facts_value:
-        fact = _fact_from_json(item)
-        if fact is not None:
-            facts.append(fact)
+    facts = [fact for item in facts_value if (fact := _fact_from_json(item)) is not None]
     return facts[:MAX_FACTS]
 
 
@@ -140,14 +131,14 @@ def _write_memory_file(path: Path, facts: list[MemoryFact]) -> None:
     finally:
         try:
             tmp_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        except OSError as exc:
+            logger.warning("Failed to remove temporary memory file %s: %s", tmp_path, exc)
 
 
 def list_memory_facts(instance_path: str | Path | None = None) -> list[MemoryFact]:
     """Return stored memory facts, newest first."""
     with _STORE_LOCK:
-        return list(_read_memory_file(memory_path_for_instance(instance_path)))
+        return _read_memory_file(memory_path_for_instance(instance_path))
 
 
 def add_memory_fact(instance_path: str | Path | None, text: str) -> MemoryFact | None:

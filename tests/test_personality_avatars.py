@@ -19,16 +19,12 @@ from reachy_mini_conversation_app.avatars import (
 )
 from reachy_mini_conversation_app.personality import save_user_personality
 from reachy_mini_conversation_app.profile_store import DEFAULT_PROFILE_NAME
-from reachy_mini_conversation_app.personality_routes import (
-    RouteError,
-    PersonalityOps,
-    build_personality_ops,
-)
+from reachy_mini_conversation_app.personality_routes import RouteError, PersonalityOps
 
 
 def _ops() -> PersonalityOps:
     """Build ops with stub callbacks; get_all/avatar touch neither loop nor handler."""
-    return build_personality_ops(object(), lambda: None)  # type: ignore[arg-type]
+    return PersonalityOps(object(), lambda: None)  # type: ignore[arg-type]
 
 
 def test_avatar_id_maps_builtin_to_slug() -> None:

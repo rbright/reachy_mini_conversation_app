@@ -1,6 +1,6 @@
 import base64
 import logging
-from typing import Any, Dict
+from typing import Any
 
 from reachy_mini_conversation_app.tools.core_tools import Tool, ToolDependencies
 
@@ -35,7 +35,7 @@ class Camera(Tool):
         "required": ["question"],
     }
 
-    async def __call__(self, deps: ToolDependencies, **kwargs: Any) -> Dict[str, Any]:
+    async def __call__(self, deps: ToolDependencies, **kwargs: Any) -> dict[str, Any]:
         """Take a picture with the camera and return the base64-encoded JPEG."""
         question = (kwargs.get("question") or "").strip()
         if not question:

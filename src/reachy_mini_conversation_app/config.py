@@ -229,19 +229,12 @@ class WakeWordSettings:
 def resolve_wake_word_settings(default_sleep_phrases: tuple[str, ...]) -> WakeWordSettings:
     """Read wake-word settings from the environment."""
     raw_threshold = os.getenv(WAKE_WORD_THRESHOLD_ENV, "").strip()
-    model_path = os.getenv(WAKE_WORD_MODEL_ENV, "").strip() or None
     try:
         threshold = float(raw_threshold) if raw_threshold else DEFAULT_WAKE_WORD_THRESHOLD
+        valid = 0.0 < threshold <= 1.0
     except ValueError:
-        logger.warning(
-            "Invalid %s=%r; using %.2f.",
-            WAKE_WORD_THRESHOLD_ENV,
-            raw_threshold,
-            DEFAULT_WAKE_WORD_THRESHOLD,
-        )
-        threshold = DEFAULT_WAKE_WORD_THRESHOLD
-
-    if not 0.0 < threshold <= 1.0:
+        valid = False
+    if not valid:
         logger.warning(
             "Invalid %s=%r; using %.2f.",
             WAKE_WORD_THRESHOLD_ENV,
@@ -253,7 +246,7 @@ def resolve_wake_word_settings(default_sleep_phrases: tuple[str, ...]) -> WakeWo
     sleep_phrases = tuple(phrase.strip() for phrase in os.getenv(SLEEP_PHRASES_ENV, "").split(",") if phrase.strip())
     return WakeWordSettings(
         enabled=_env_flag(WAKE_WORD_ENABLED_ENV, default=True),
-        model_path=model_path,
+        model_path=_env_text(WAKE_WORD_MODEL_ENV),
         threshold=threshold,
         sleep_phrases=sleep_phrases or default_sleep_phrases,
     )
@@ -328,10 +321,7 @@ def parse_hf_realtime_url(realtime_url: str) -> HFRealtimeURLParts:
 
     path = parsed.path.rstrip("/")
     has_realtime_path = path.endswith("/realtime")
-    if has_realtime_path:
-        base_path = path[: -len("/realtime")]
-    else:
-        base_path = path
+    base_path = path.removesuffix("/realtime")
 
     connect_query = {key: value for key, value in parse_qsl(parsed.query, keep_blank_values=True) if key != "model"}
     http_scheme = "https" if scheme in {"wss", "https"} else "http"
@@ -355,7 +345,7 @@ def parse_hf_direct_target(ws_url: str | None) -> tuple[str | None, int | None]:
     try:
         parsed = parse_hf_realtime_url(ws_url)
         return parsed.host, parsed.port
-    except Exception:
+    except ValueError:
         return None, None
 
 
@@ -366,7 +356,7 @@ def build_hf_direct_ws_url(host: str, port: int) -> str:
 
 def _collect_profile_names(profiles_root: Path) -> set[str]:
     """Return declarative profile names from a profiles root directory."""
-    if not profiles_root.exists() or not profiles_root.is_dir():
+    if not profiles_root.is_dir():
         return set()
     return {path.name for path in profiles_root.iterdir() if path.is_dir() and (path / "profile.md").is_file()}
 
@@ -411,7 +401,6 @@ def _raise_on_name_collisions(
     )
 
 
-# Validate LOCKED_PROFILE at startup
 if LOCKED_PROFILE is not None:
     _profiles_dir = DEFAULT_PROFILES_DIRECTORY
     _profile_path = _profiles_dir / LOCKED_PROFILE
@@ -428,13 +417,12 @@ _skip_dotenv = _env_flag("REACHY_MINI_SKIP_DOTENV", default=False)
 if _skip_dotenv:
     logger.info("Skipping .env loading because REACHY_MINI_SKIP_DOTENV is set")
 else:
-    # Locate .env file (search upward from current working directory)
+    # Search upward from the current working directory.
     dotenv_path = find_dotenv(usecwd=True)
 
     if dotenv_path:
-        # Load .env and override environment variables
         load_dotenv(dotenv_path=dotenv_path, override=True)
-        logger.info(f"Configuration loaded from {dotenv_path}")
+        logger.info("Configuration loaded from %s", dotenv_path)
     else:
         logger.warning("No .env file found, using environment variables")
 
@@ -490,7 +478,7 @@ class Config:
     AUTOLOAD_EXTERNAL_TOOLS = _env_flag("AUTOLOAD_EXTERNAL_TOOLS", default=False)
     REACHY_MINI_CUSTOM_PROFILE = LOCKED_PROFILE or os.getenv("REACHY_MINI_CUSTOM_PROFILE")
 
-    logger.debug(f"Custom Profile: {REACHY_MINI_CUSTOM_PROFILE}")
+    logger.debug("Custom Profile: %s", REACHY_MINI_CUSTOM_PROFILE)
 
     def __init__(self) -> None:
         """Initialize the configuration."""
@@ -702,13 +690,13 @@ def has_openai_api_key() -> bool:
 
 def get_hf_session_url() -> str | None:
     """Return the built-in Hugging Face session proxy URL, if any."""
-    value = (getattr(config, "HF_REALTIME_SESSION_URL", None) or "").strip()
+    value = (config.HF_REALTIME_SESSION_URL or "").strip()
     return value or None
 
 
 def get_hf_direct_ws_url() -> str | None:
     """Return the configured direct Hugging Face realtime URL, if any."""
-    value = (getattr(config, "HF_REALTIME_WS_URL", None) or "").strip()
+    value = (config.HF_REALTIME_WS_URL or "").strip()
     return value or None
 
 
@@ -716,7 +704,7 @@ def get_hf_connection_selection() -> HFConnectionSelection:
     """Resolve the selected Hugging Face connection mode and whether it is usable."""
     session_url = get_hf_session_url()
     direct_ws_url = get_hf_direct_ws_url()
-    mode = normalize_hf_connection_mode(getattr(config, "HF_REALTIME_CONNECTION_MODE", None))
+    mode = normalize_hf_connection_mode(config.HF_REALTIME_CONNECTION_MODE)
     if mode is None:
         raise RuntimeError(f"{HF_REALTIME_CONNECTION_MODE_ENV} must be set to local or deployed.")
 

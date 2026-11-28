@@ -15,3 +15,6 @@ class SystemTool(Enum):
 
     TASK_STATUS = "task_status"
     TASK_CANCEL = "task_cancel"
+
+
+SYSTEM_TOOL_NAMES = frozenset(tool.value for tool in SystemTool)

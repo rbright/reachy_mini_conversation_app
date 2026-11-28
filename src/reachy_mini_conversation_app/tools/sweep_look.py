@@ -41,64 +41,29 @@ class SweepLook(Tool):
         left_head_pose = create_head_pose(0, 0, 0, 0, 0, max_angle, degrees=False)
         center_head_pose = create_head_pose(0, 0, 0, 0, 0, 0, degrees=False)
         right_head_pose = create_head_pose(0, 0, 0, 0, 0, -max_angle, degrees=False)
-        moves = [
-            GotoQueueMove(
-                target_head_pose=left_head_pose,
-                start_head_pose=current_head_pose,
-                target_antennas=current_antennas,
-                start_antennas=current_antennas,
-                target_body_yaw=current_body_yaw + max_angle,
-                start_body_yaw=current_body_yaw,
-                duration=transition_duration,
-            ),
-            GotoQueueMove(
-                target_head_pose=left_head_pose,
-                start_head_pose=left_head_pose,
-                target_antennas=current_antennas,
-                start_antennas=current_antennas,
-                target_body_yaw=current_body_yaw + max_angle,
-                start_body_yaw=current_body_yaw + max_angle,
-                duration=hold_duration,
-            ),
-            GotoQueueMove(
-                target_head_pose=center_head_pose,
-                start_head_pose=left_head_pose,
-                target_antennas=current_antennas,
-                start_antennas=current_antennas,
-                target_body_yaw=current_body_yaw,
-                start_body_yaw=current_body_yaw + max_angle,
-                duration=transition_duration,
-            ),
-            GotoQueueMove(
-                target_head_pose=right_head_pose,
-                start_head_pose=center_head_pose,
-                target_antennas=current_antennas,
-                start_antennas=current_antennas,
-                target_body_yaw=current_body_yaw - max_angle,
-                start_body_yaw=current_body_yaw,
-                duration=transition_duration,
-            ),
-            GotoQueueMove(
-                target_head_pose=right_head_pose,
-                start_head_pose=right_head_pose,
-                target_antennas=current_antennas,
-                start_antennas=current_antennas,
-                target_body_yaw=current_body_yaw - max_angle,
-                start_body_yaw=current_body_yaw - max_angle,
-                duration=hold_duration,
-            ),
-            GotoQueueMove(
-                target_head_pose=center_head_pose,
-                start_head_pose=right_head_pose,
-                target_antennas=current_antennas,
-                start_antennas=current_antennas,
-                target_body_yaw=current_body_yaw,
-                start_body_yaw=current_body_yaw - max_angle,
-                duration=transition_duration,
-            ),
-        ]
-        for move in moves:
-            deps.movement_manager.queue_move(move)
+        left_body_yaw = current_body_yaw + max_angle
+        right_body_yaw = current_body_yaw - max_angle
+        # (start head, target head, start body yaw, target body yaw, duration)
+        segments = (
+            (current_head_pose, left_head_pose, current_body_yaw, left_body_yaw, transition_duration),
+            (left_head_pose, left_head_pose, left_body_yaw, left_body_yaw, hold_duration),
+            (left_head_pose, center_head_pose, left_body_yaw, current_body_yaw, transition_duration),
+            (center_head_pose, right_head_pose, current_body_yaw, right_body_yaw, transition_duration),
+            (right_head_pose, right_head_pose, right_body_yaw, right_body_yaw, hold_duration),
+            (right_head_pose, center_head_pose, right_body_yaw, current_body_yaw, transition_duration),
+        )
+        for start_head_pose, target_head_pose, start_body_yaw, target_body_yaw, duration in segments:
+            deps.movement_manager.queue_move(
+                GotoQueueMove(
+                    target_head_pose=target_head_pose,
+                    start_head_pose=start_head_pose,
+                    target_antennas=current_antennas,
+                    start_antennas=current_antennas,
+                    target_body_yaw=target_body_yaw,
+                    start_body_yaw=start_body_yaw,
+                    duration=duration,
+                )
+            )
 
         total_duration = transition_duration * 4 + hold_duration * 2
         deps.movement_manager.set_moving_state(total_duration)

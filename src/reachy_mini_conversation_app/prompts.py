@@ -31,8 +31,7 @@ def get_session_instructions(instance_path: str | Path | None = None) -> str:
     selected_profile = config.REACHY_MINI_CUSTOM_PROFILE
     profile_name = selected_profile or DEFAULT_PROFILE_NAME
     try:
-        profile = _active_profile()
-        instructions = profile.instructions.strip()
+        instructions = _active_profile().instructions.strip()
     except (FileNotFoundError, ProfileFormatError) as exc:
         logger.warning("Failed to load profile %r: %s", profile_name, exc)
         instructions = ""

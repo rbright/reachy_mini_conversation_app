@@ -1,4 +1,3 @@
-from __future__ import annotations
 from typing import Any
 
 import reachy_mini_conversation_app.idle_policy as idle_policy_mod

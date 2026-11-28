@@ -133,7 +133,6 @@ def register_tool_space_methods(
         slug = _required_slug(params)
         try:
             result = await asyncio.to_thread(remove_tool_space, slug, instance_path)
-            disabled_profiles = result.disabled_profiles
         except ToolSpaceNotInstalledError as exc:
             logger.warning("Cannot remove tool Space %r: %s", slug, exc)
             raise_tool_settings_error("tool_space_not_installed", _error_detail(exc))
@@ -159,11 +158,11 @@ def register_tool_space_methods(
                 restart_conversation,
                 "tool_spaces_changed",
             )
-            if any(profile_name == active_profile for profile_name, _ in disabled_profiles)
+            if any(profile_name == active_profile for profile_name, _ in result.disabled_profiles)
             else "No active conversation restart is needed."
         )
 
-        disabled_tool_count = sum(len(tool_ids) for _, tool_ids in disabled_profiles)
+        disabled_tool_count = sum(len(tool_ids) for _, tool_ids in result.disabled_profiles)
         tool_label = "tool" if disabled_tool_count == 1 else "tools"
         message = (
             f"Removed {result.removed_space.slug}. Disabled {disabled_tool_count} {tool_label} across personalities. "

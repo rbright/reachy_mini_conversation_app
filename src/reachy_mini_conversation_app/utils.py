@@ -1,11 +1,9 @@
-from __future__ import annotations
 import logging
 import argparse
 import warnings
-from typing import Optional
 
 
-def parse_args() -> tuple[argparse.Namespace, list]:  # type: ignore
+def parse_args() -> tuple[argparse.Namespace, list[str]]:
     """Parse command line arguments."""
     parser = argparse.ArgumentParser("Reachy Mini Conversation App")
     parser.add_argument("--no-camera", default=False, action="store_true", help="Disable camera usage")
@@ -50,10 +48,9 @@ def parse_args() -> tuple[argparse.Namespace, list]:  # type: ignore
 
 
 def setup_logger(debug: bool) -> logging.Logger:
-    """Setups the logger."""
-    log_level = "DEBUG" if debug else "INFO"
+    """Configure root logging and return this module's logger."""
     logging.basicConfig(
-        level=getattr(logging, log_level, logging.INFO),
+        level=logging.DEBUG if debug else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s:%(lineno)d | %(message)s",
         force=True,
     )
@@ -64,7 +61,7 @@ def setup_logger(debug: bool) -> logging.Logger:
     warnings.filterwarnings("ignore", category=UserWarning, module="aiortc")
 
     # Tame third-party noise (looser in DEBUG)
-    if log_level == "DEBUG":
+    if debug:
         logging.getLogger("aiortc").setLevel(logging.INFO)
         logging.getLogger("aioice").setLevel(logging.INFO)
         logging.getLogger("openai").setLevel(logging.INFO)
@@ -75,13 +72,13 @@ def setup_logger(debug: bool) -> logging.Logger:
     return logger
 
 
-def log_connection_troubleshooting(logger: logging.Logger, robot_name: Optional[str]) -> None:
+def log_connection_troubleshooting(logger: logging.Logger, robot_name: str | None) -> None:
     """Log troubleshooting steps for connection issues."""
     logger.error("Troubleshooting steps:")
     logger.error("  1. Verify reachy-mini-daemon is running")
 
     if robot_name is not None:
-        logger.error(f"  2. Daemon must be started with: --robot-name '{robot_name}'")
+        logger.error("  2. Daemon must be started with: --robot-name '%s'", robot_name)
     else:
         logger.error("  2. If daemon uses --robot-name, add the same flag here: --robot-name <name>")
 

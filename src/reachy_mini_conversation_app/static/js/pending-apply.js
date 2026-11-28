@@ -6,18 +6,14 @@
 let pending = null;
 
 /**
- * Record an in-flight personality apply.
+ * Record an in-flight personality apply, or clear it with null.
  *
- * @param {{ name: string, promise: Promise<unknown> }} entry
+ * @param {{ name: string, promise: Promise<unknown> } | null} entry
  */
 export function setPendingApply(entry) {
-  if (!entry || typeof entry.promise?.then !== "function") {
-    pending = null;
-    return;
-  }
   pending = entry;
   // Avoid an unhandledrejection if /talk never mounts to consume this.
-  entry.promise.catch(() => {});
+  entry?.promise.catch(() => {});
 }
 
 /**

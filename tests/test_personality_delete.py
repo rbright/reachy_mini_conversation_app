@@ -12,11 +12,7 @@ from reachy_mini_conversation_app.profile_toolsets import (
     read_profile_tool_override,
     write_profile_tool_override,
 )
-from reachy_mini_conversation_app.personality_routes import (
-    RouteError,
-    PersonalityOps,
-    build_personality_ops,
-)
+from reachy_mini_conversation_app.personality_routes import RouteError, PersonalityOps
 from reachy_mini_conversation_app.profile_vault_access import (
     ProfileVaultAccess,
     read_profile_vault_access,
@@ -29,7 +25,7 @@ def _make_user_profile(name: str) -> None:
 
 
 def _ops(persisted: str | None = None) -> PersonalityOps:
-    return build_personality_ops(
+    return PersonalityOps(
         MagicMock(),
         lambda: None,
         get_persisted_personality=lambda: persisted,
@@ -53,7 +49,7 @@ def test_delete_removes_user_profile(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert list(read_profile_vault_access(tmp_path)) == ["user_personalities/kept"]
 
 
-def test_delete_refuses_builtin_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_delete_refuses_builtin_profile() -> None:
     """Built-in profiles cannot be deleted."""
     builtin_dir = config.resolve_profile_dir("mad_scientist_assistant")
     assert builtin_dir.is_dir()

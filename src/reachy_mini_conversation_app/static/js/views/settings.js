@@ -17,11 +17,16 @@ import {
 } from "../api.js";
 import { BACKENDS, SHOW_LATENCIES_KEY } from "../constants.js";
 import { buildProfileVaultAccessSection } from "../components/vault-access.js";
-import { h } from "../ui.js";
+import { h, settingsField } from "../ui.js";
 
 const HF_CONNECTION_MODES = Object.freeze({
   DEPLOYED: "deployed",
   LOCAL: "local",
+});
+
+const HF_MODE_LABELS = Object.freeze({
+  [HF_CONNECTION_MODES.DEPLOYED]: "Hosted",
+  [HF_CONNECTION_MODES.LOCAL]: "Local",
 });
 
 const DEFAULT_HF_HOST = "localhost";
@@ -46,6 +51,16 @@ const OBSIDIAN_STATE_LABELS = Object.freeze({
   starting: "Starting…",
   syncing: "Syncing",
   error: "Error",
+});
+
+const BACKEND_STATE_LABELS = Object.freeze({
+  connected: "Connected",
+  connecting: "Connecting…",
+  disconnected: "Disconnected",
+  not_started: "Not started",
+  sleeping: "Sleeping — waiting for wake word",
+  restart_required: "Restart required",
+  waiting_for_config: "Waiting for configuration",
 });
 
 export async function mountSettingsView({ outlet, signal }) {
@@ -127,8 +142,7 @@ function buildConnectionSection({ onSaved } = {}) {
   const hfModeSelect = h(
     "select",
     { class: "settings-select", name: "hf_mode" },
-    h("option", { value: HF_CONNECTION_MODES.DEPLOYED }, "Hosted"),
-    h("option", { value: HF_CONNECTION_MODES.LOCAL }, "Local")
+    ...Object.entries(HF_MODE_LABELS).map(([value, label]) => h("option", { value }, label))
   );
   const hfHostInput = h("input", {
     type: "text",
@@ -157,8 +171,8 @@ function buildConnectionSection({ onSaved } = {}) {
   const hfLocalFields = h(
     "div",
     { class: "settings-field-row", "data-role": "hf-local-fields" },
-    h("label", { class: "settings-field" }, h("span", { class: "settings-label" }, "Host/IP"), hfHostInput),
-    h("label", { class: "settings-field" }, h("span", { class: "settings-label" }, "Port"), hfPortInput)
+    settingsField("Host/IP", hfHostInput),
+    settingsField("Port", hfPortInput)
   );
   const hint = h("p", { class: "settings-hint" }, "");
   const status = h("p", { class: "settings-status", role: "status", "aria-live": "polite" });
@@ -168,7 +182,7 @@ function buildConnectionSection({ onSaved } = {}) {
   const form = h(
     "form",
     { class: "settings-form" },
-    h("label", { class: "settings-field" }, h("span", { class: "settings-label" }, "Provider"), backendSelect),
+    settingsField("Provider", backendSelect),
     apiKeyField,
     openaiModelField,
     hfModeField,
@@ -281,7 +295,7 @@ function buildVoiceSection() {
   const form = h(
     "form",
     { class: "settings-form" },
-    h("label", { class: "settings-field" }, h("span", { class: "settings-label" }, "Voice"), select),
+    settingsField("Voice", select),
     h("div", { class: "settings-actions" }, submitButton),
     status
   );
@@ -459,9 +473,9 @@ function buildObsidianSection({ signal }) {
   const loginForm = h(
     "form",
     { class: "settings-form" },
-    h("label", { class: "settings-field" }, h("span", { class: "settings-label" }, "Email"), emailInput),
-    h("label", { class: "settings-field" }, h("span", { class: "settings-label" }, "Password"), passwordInput),
-    h("label", { class: "settings-field" }, h("span", { class: "settings-label" }, "2FA code"), mfaInput),
+    settingsField("Email", emailInput),
+    settingsField("Password", passwordInput),
+    settingsField("2FA code", mfaInput),
     h("div", { class: "settings-actions" }, loginButton, logoutButton),
     loginStatus
   );
@@ -514,32 +528,22 @@ function buildObsidianSection({ signal }) {
       enabledInput,
       h("span", { class: "settings-tool-choice-copy" }, h("strong", {}, "Sync the vault on this robot"))
     ),
-    h("label", { class: "settings-field" }, h("span", { class: "settings-label" }, "ob executable"), binInput),
+    settingsField("ob executable", binInput),
     h(
       "div",
       { class: "settings-field-row" },
-      h("label", { class: "settings-field" }, h("span", { class: "settings-label" }, "Remote vault"), vaultSelect),
+      settingsField("Remote vault", vaultSelect),
       h("div", { class: "settings-actions" }, loadVaultsButton)
     ),
-    h("label", { class: "settings-field" }, h("span", { class: "settings-label" }, "Local path"), pathInput),
-    h("label", { class: "settings-field" }, h("span", { class: "settings-label" }, "Device name"), deviceInput),
+    settingsField("Local path", pathInput),
+    settingsField("Device name", deviceInput),
     h(
       "div",
       { class: "settings-field-row" },
-      h("label", { class: "settings-field" }, h("span", { class: "settings-label" }, "Sync mode"), modeSelect),
-      h(
-        "label",
-        { class: "settings-field" },
-        h("span", { class: "settings-label" }, "Conflict strategy"),
-        strategySelect
-      )
+      settingsField("Sync mode", modeSelect),
+      settingsField("Conflict strategy", strategySelect)
     ),
-    h(
-      "label",
-      { class: "settings-field" },
-      h("span", { class: "settings-label" }, "End-to-end encryption password"),
-      e2eeInput
-    ),
+    settingsField("End-to-end encryption password", e2eeInput),
     h("div", { class: "settings-actions" }, saveButton),
     configStatus
   );
@@ -706,7 +710,7 @@ function buildStatusSection() {
           statusRow("API key", payload.has_openai_key ? "Configured" : "Missing", payload.has_openai_key ? "ok" : "warn")
         );
       } else {
-        list.appendChild(statusRow("HF connection", formatHfMode(payload.hf_connection_mode)));
+        list.appendChild(statusRow("HF connection", HF_MODE_LABELS[payload.hf_connection_mode] || "-"));
         if (payload.hf_connection_mode === HF_CONNECTION_MODES.LOCAL) {
           list.appendChild(statusRow("HF target", formatHfTarget(payload)));
         }
@@ -717,19 +721,10 @@ function buildStatusSection() {
       const backendState = payload.backend_connected
         ? "connected"
         : payload.backend_connection_state || "not_started";
-      const backendLabels = {
-        connected: "Connected",
-        connecting: "Connecting…",
-        disconnected: "Disconnected",
-        not_started: "Not started",
-        sleeping: "Sleeping — waiting for wake word",
-        restart_required: "Restart required",
-        waiting_for_config: "Waiting for configuration",
-      };
       list.appendChild(
         statusRow(
           "Backend",
-          backendLabels[backendState] || "Unavailable",
+          BACKEND_STATE_LABELS[backendState] || "Unavailable",
           backendState === "connected" || (backendState === "sleeping" && !payload.backend_error)
             ? "ok"
             : backendState === "not_started"
@@ -755,12 +750,6 @@ function statusRow(label, value, tone) {
   );
 }
 
-function formatHfMode(mode) {
-  if (mode === HF_CONNECTION_MODES.LOCAL) return "Local";
-  if (mode === HF_CONNECTION_MODES.DEPLOYED) return "Hosted";
-  return "-";
-}
-
 function formatHfTarget(payload) {
   const host = payload?.hf_direct_host;
   const port = payload?.hf_direct_port;
@@ -782,20 +771,18 @@ async function refreshStatus({ statusSection, connectionSection, speechSection, 
 }
 
 async function refreshVoices({ voiceSection, signal }) {
-  let voices = [];
-  let current = "";
-  try {
-    voices = await untilReady(listVoices, signal);
-  } catch {
-    voices = [];
-  }
+  const voices = await untilReady(listVoices, signal).catch((error) => {
+    if (!signal.aborted) console.warn("Failed to list voices", error);
+    return [];
+  });
   if (signal.aborted) return;
-  try {
-    const data = await getCurrentVoice();
-    current = data?.voice || "";
-  } catch {
-    current = "";
-  }
+  const current = await getCurrentVoice().then(
+    (data) => data?.voice || "",
+    (error) => {
+      console.warn("Failed to load the current voice", error);
+      return "";
+    }
+  );
   if (signal.aborted) return;
   voiceSection.setOptions(voices, current);
 }

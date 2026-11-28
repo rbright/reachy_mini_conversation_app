@@ -32,7 +32,7 @@ export async function mountTalkView({ outlet, signal }) {
   let micReady = false;
   let togglePending = false;
   let activePersonality = null;
-  let subscription = null;
+  let unsubscribeActivity = null;
 
   const caption = h(
     "p",
@@ -80,11 +80,9 @@ export async function mountTalkView({ outlet, signal }) {
     if (signal.aborted) return;
     // The activity subscription will flip the orb to its resting state next tick.
     caption.textContent = CAPTION_BY_STATE[ORB_STATES.CONNECTING];
-    void refreshPersonalityState();
-  } else {
-    // Deep link to /talk with no pending apply: refresh the header badge.
-    void refreshPersonalityState();
   }
+  // Also covers a deep link to /talk with no pending apply: the header badge needs the active personality.
+  void refreshPersonalityState();
 
   const micState = await micStatePromise;
   if (micState) muted = Boolean(micState.muted);
@@ -93,31 +91,26 @@ export async function mountTalkView({ outlet, signal }) {
   orb.root.disabled = false;
   syncMicAria();
 
-  subscription = subscribeConversationEvents({
-    // Re-sync mic state after subscribing: another tab may have toggled it.
-    onReady: async () => {
-      if (!togglePending) {
-        try {
-          muted = Boolean((await getMicState())?.muted);
-        } catch {
-          // keep the last known mute state
-        }
-      }
-      if (signal.aborted) return;
-      orb.setState(restingState());
-      caption.textContent = CAPTION_BY_STATE[restingState()];
-      syncMicAria();
-    },
-    onActivity: (reason) => {
-      if (muted) return;
-      const next = mapActivityToState(reason);
-      if (next == null) return;
-      orb.setState(next);
-    },
+  // The shared /rpc client (api.js) owns reconnection.
+  unsubscribeActivity = subscribe("conversation.activity", (params) => {
+    if (muted) return;
+    const next = mapActivityToState((params?.reason || "").trim());
+    if (next != null) orb.setState(next);
   });
 
+  // Re-sync mic state after subscribing: another tab may have toggled it.
+  if (!togglePending) {
+    try {
+      muted = Boolean((await getMicState())?.muted);
+    } catch (error) {
+      console.warn("Failed to refresh microphone state; keeping the last known state", error);
+    }
+  }
+  if (signal.aborted) return;
+  showRestingState();
+
   function cleanup() {
-    subscription?.close();
+    unsubscribeActivity?.();
     conversationPanel.dispose();
     orb.dispose();
     if (defaultAction) {
@@ -126,8 +119,12 @@ export async function mountTalkView({ outlet, signal }) {
     }
   }
 
-  function restingState() {
-    return muted ? ORB_STATES.MUTED : ORB_STATES.IDLE;
+  function showRestingState() {
+    const state = muted ? ORB_STATES.MUTED : ORB_STATES.IDLE;
+    orb.setState(state);
+    // setState skips unchanged states, so set the caption explicitly
+    caption.textContent = CAPTION_BY_STATE[state];
+    syncMicAria();
   }
 
   async function onMicTap() {
@@ -145,21 +142,21 @@ export async function mountTalkView({ outlet, signal }) {
       togglePending = false;
     }
     if (signal.aborted) return;
-    orb.setState(restingState());
-    // setState skips unchanged states, so set the caption explicitly
-    caption.textContent = CAPTION_BY_STATE[restingState()];
-    syncMicAria();
+    showRestingState();
   }
 
   async function refreshPersonalityState() {
-    const personalityState = await fetchPersonalityState();
-    if (signal.aborted || personalityState == null) return;
-    activePersonality = personalityState.current;
-    setPersonality(personalityState.current);
-    const shouldHide = personalityState.locked || personalityState.current === personalityState.startup;
-    if (defaultAction) {
-      defaultAction.hidden = shouldHide;
+    let data;
+    try {
+      data = await listPersonalities();
+    } catch (error) {
+      console.warn("Failed to load the active personality", error);
+      return;
     }
+    if (signal.aborted || !data?.current) return;
+    activePersonality = data.current;
+    setPersonality(data.current);
+    if (defaultAction) defaultAction.hidden = Boolean(data.locked) || data.current === (data.startup || "default");
   }
 
   async function onSetDefault() {
@@ -189,41 +186,4 @@ export async function mountTalkView({ outlet, signal }) {
     orb.root.setAttribute("aria-pressed", String(!muted));
     orb.root.setAttribute("aria-label", muted ? "Unmute microphone" : "Mute microphone");
   }
-}
-
-async function fetchPersonalityState() {
-  try {
-    const data = await listPersonalities();
-    const current = data?.current;
-    if (!current) return null;
-    return {
-      current,
-      startup: data?.startup || "default",
-      locked: Boolean(data?.locked),
-    };
-  } catch {
-    return null;
-  }
-}
-
-function subscribeConversationEvents({ onActivity, onReady } = {}) {
-  if (typeof onActivity !== "function") {
-    throw new TypeError("subscribeConversationEvents: onActivity is required");
-  }
-
-  // Activity reasons now arrive as conversation.activity notifications over the
-  // /rpc WebSocket; the shared client (api.js) owns reconnection.
-  const unsubscribe = subscribe("conversation.activity", (params) => {
-    const reason = (params?.reason || "").trim();
-    if (reason) onActivity(reason);
-  });
-
-  // The socket connects lazily, so schedule the initial mic and orb sync.
-  if (typeof onReady === "function") Promise.resolve().then(onReady);
-
-  return {
-    close() {
-      unsubscribe();
-    },
-  };
 }

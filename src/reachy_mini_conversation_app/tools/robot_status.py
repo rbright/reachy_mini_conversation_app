@@ -32,6 +32,8 @@ _MOVING_GYRO_RAD_S = 0.15
 # rests visibly off-centre: a disabled head droops nose-down well past this.
 _LEVEL_TOLERANCE_DEG = 5.0
 
+_NO_IMU_ERROR = "this robot has no IMU reading available"
+
 
 async def _get(deps: ToolDependencies, path: str, timeout_s: float = DEFAULT_TIMEOUT_S) -> Any:
     """Read a daemon endpoint off the event loop."""
@@ -106,12 +108,12 @@ async def _imu(deps: ToolDependencies) -> dict[str, Any]:
     """Report which way the head is tilted, whether it is moving, and its temperature."""
     reading = await _get(deps, _IMU_PATH)
     if not isinstance(reading, dict):
-        return {"error": "this robot has no IMU reading available"}
+        return {"error": _NO_IMU_ERROR}
 
     accelerometer = reading.get("accelerometer") or []
     gyroscope = reading.get("gyroscope") or []
     if len(accelerometer) != 3 or len(gyroscope) != 3:
-        return {"error": "this robot has no IMU reading available"}
+        return {"error": _NO_IMU_ERROR}
 
     # At rest the accelerometer reads gravity as an "up" vector in the head frame,
     # which is X forward / Y left / Z up (see look_at.py: straight_head_vector is
@@ -120,7 +122,7 @@ async def _imu(deps: ToolDependencies) -> dict[str, Any]:
     # vs 28.4 by kinematics, and a head tilted right by hand read +44.4 vs +43.5.
     gravity_magnitude = math.sqrt(sum(axis * axis for axis in accelerometer))
     if gravity_magnitude == 0:
-        return {"error": "this robot has no IMU reading available"}
+        return {"error": _NO_IMU_ERROR}
 
     forward_deg = math.degrees(math.asin(max(-1.0, min(1.0, -accelerometer[0] / gravity_magnitude))))
     right_deg = math.degrees(math.asin(max(-1.0, min(1.0, accelerometer[1] / gravity_magnitude))))

@@ -493,12 +493,12 @@ def query_notes(
     for directory, dirnames, filenames in os.walk(root):
         dirnames[:] = sorted(name for name in dirnames if not name.startswith("."))
         for name in sorted(filenames):
+            if name.startswith(".") or not name.endswith(".md"):
+                continue
             file_path = Path(directory) / name
             path = file_path.relative_to(root).as_posix()
             if (
-                name.startswith(".")
-                or not name.endswith(".md")
-                or file_path.is_symlink()
+                file_path.is_symlink()
                 or not (covers(folders, path) and covers(access.read, path))
                 or (scope is not None and not covers((scope,), path))
             ):

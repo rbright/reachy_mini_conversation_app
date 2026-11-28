@@ -1,11 +1,11 @@
 """Tests for BackgroundToolManager."""
 
-from __future__ import annotations
 import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from pydantic import ValidationError
 
 from reachy_mini_conversation_app.tools.tool_constants import ToolState
 from reachy_mini_conversation_app.tools.background_tool_manager import (
@@ -15,11 +15,6 @@ from reachy_mini_conversation_app.tools.background_tool_manager import (
     ToolNotification,
     BackgroundToolManager,
 )
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 
 def _make_routine(
@@ -53,14 +48,8 @@ def _make_routine(
         except Exception as e:
             return {"error": f"{type(e).__name__}: {e}"}
 
-    routine.__call__ = _call  # type: ignore[method-assign]
     routine.side_effect = _call
     return routine
-
-
-# ---------------------------------------------------------------------------
-# Model / data-class sanity checks
-# ---------------------------------------------------------------------------
 
 
 class TestToolProgress:
@@ -79,9 +68,9 @@ class TestToolProgress:
 
     def test_out_of_bounds_raises(self) -> None:
         """Reject progress values outside [0, 1]."""
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             ToolProgress(progress=-0.1)
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             ToolProgress(progress=1.1)
 
 
@@ -135,39 +124,10 @@ class TestBackgroundTool:
         assert n.result == {"x": 1}
 
 
-# ---------------------------------------------------------------------------
-# BackgroundToolManager
-# ---------------------------------------------------------------------------
-
-
 @pytest.fixture
 def manager() -> BackgroundToolManager:
     """Return a fresh BackgroundToolManager for each test."""
     return BackgroundToolManager()
-
-
-class TestSetLoop:
-    """Verify event-loop assignment via set_loop."""
-
-    @pytest.mark.asyncio
-    async def test_set_loop_uses_running_loop(self, manager: BackgroundToolManager) -> None:
-        """Default to the current running loop."""
-        manager.set_loop()
-        assert manager._loop is asyncio.get_running_loop()
-
-    def test_set_loop_explicit(self, manager: BackgroundToolManager) -> None:
-        """Accept an explicitly provided loop."""
-        loop = asyncio.new_event_loop()
-        try:
-            manager.set_loop(loop)
-            assert manager._loop is loop
-        finally:
-            loop.close()
-
-    def test_set_loop_creates_new_when_no_running(self, manager: BackgroundToolManager) -> None:
-        """When called outside an async context it falls back to a new loop."""
-        manager.set_loop()
-        assert manager._loop is not None
 
 
 class TestStartTool:

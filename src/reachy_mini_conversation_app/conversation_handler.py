@@ -1,4 +1,3 @@
-from __future__ import annotations
 import time
 import asyncio
 import logging
@@ -156,8 +155,7 @@ class ConversationHandler(AsyncStreamHandler, ABC):
                 logger.warning("Idle tool skipped (connection closed?): %s", e)
                 return None
             self.last_idle_behavior_time = now
-        handler_output = await wait_for_item(self.output_queue)
-        return handler_output
+        return await wait_for_item(self.output_queue)
 
     async def send_idle_signal(self, idle_duration: float) -> None:
         """Run a locally selected idle tool without sending an idle turn to the model."""
@@ -177,63 +175,43 @@ class ConversationHandler(AsyncStreamHandler, ABC):
     @abstractmethod
     def _is_connected(self) -> bool:
         """Return whether the backend session/connection is currently open."""
-        ...
 
     @abstractmethod
     async def start_up(self) -> None:
         """Start the realtime handler."""
-        ...
 
     @abstractmethod
     async def shutdown(self) -> None:
         """Shut down the realtime handler."""
-        ...
 
     @abstractmethod
     async def receive(self, frame: tuple[int, AudioArray]) -> None:
         """Receive an input audio frame."""
-        ...
 
     @abstractmethod
     async def apply_personality(self, profile: str | None) -> str:
         """Apply a personality profile."""
-        ...
 
     async def refresh_instructions(self) -> bool:
-        """Rebuild the session instructions and push them to a live session.
-
-        Long-term memory is part of the prompt, so erasing it only reaches the
-        model once its instructions are replaced. Returns whether a live
-        session was updated; False means the next session picks it up anyway.
-        """
+        """Push rebuilt instructions (with long-term memory) to a live session; return whether one was updated."""
         return False
 
     @abstractmethod
     async def get_available_voices(self) -> list[str]:
         """Return voices available for the active backend."""
-        ...
 
     @abstractmethod
     def get_current_voice(self) -> str:
         """Return the current voice."""
-        ...
 
     @abstractmethod
     async def change_voice(self, voice: str) -> str:
         """Change the current voice."""
-        ...
 
     @abstractmethod
     async def say(self, text: str) -> None:
-        """Make the robot speak ``text`` now (injected turn; not verbatim TTS).
-
-        The backend is speech-to-speech, so ``text`` is an instruction the
-        model voices, not a guaranteed-literal string. Raises if no session is
-        open.
-        """
-        ...
+        """Make the robot voice ``text`` now as an injected turn, not verbatim TTS; raise if no session is open."""
 
     @abstractmethod
     async def interrupt(self) -> None:
         """Stop playback and cancel the response still being generated."""
-        ...

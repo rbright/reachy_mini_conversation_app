@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+import reachy_mini_conversation_app.profile_store as profile_store_mod
 from reachy_mini_conversation_app.profile_store import (
     write_profile,
     list_profile_names,
@@ -81,17 +82,15 @@ def test_migration_loses_a_race_against_a_concurrent_save(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A profile.md saved from the UI mid-migration must not be overwritten."""
-    import reachy_mini_conversation_app.profile_store as store
-
     _write_legacy(tmp_path / "racy", instructions="ancienne version")
-    real_read = store._read_legacy_profile
+    real_read = profile_store_mod._read_legacy_profile
 
-    def read_then_save_from_ui(profile_name: str, profile_directory: Path) -> store.ProfileDefinition:
+    def read_then_save_from_ui(profile_name: str, profile_directory: Path) -> profile_store_mod.ProfileDefinition:
         legacy = real_read(profile_name, profile_directory)
         write_profile(profile_name, profile_directory, "sauvegarde UI", ["dance"])
         return legacy
 
-    monkeypatch.setattr(store, "_read_legacy_profile", read_then_save_from_ui)
+    monkeypatch.setattr(profile_store_mod, "_read_legacy_profile", read_then_save_from_ui)
 
     assert migrate_legacy_profiles(tmp_path) == []
 

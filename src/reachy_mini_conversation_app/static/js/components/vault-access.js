@@ -1,7 +1,7 @@
 /** Per-personality Obsidian vault access controls. */
 
 import { describeError, getProfileVaultAccess, saveProfileVaultAccess } from "../api.js";
-import { h, prettifyProfileName } from "../ui.js";
+import { h, profileOptions, settingsField } from "../ui.js";
 
 const WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 
@@ -33,17 +33,27 @@ export function buildProfileVaultAccessSection({ signal } = {}) {
   const form = h(
     "form",
     { class: "settings-form" },
-    field("Configure for", profileSelect),
-    field("Agent", agentInput),
-    h("div", { class: "settings-field-row" }, field("Read folders", readInput), field("Write folders", writeInput)),
-    field("Session context notes", contextInput),
+    settingsField("Configure for", profileSelect),
+    settingsField("Agent", agentInput),
+    h(
+      "div",
+      { class: "settings-field-row" },
+      settingsField("Read folders", readInput),
+      settingsField("Write folders", writeInput)
+    ),
+    settingsField("Session context notes", contextInput),
     h("h3", { class: "settings-label" }, "Session log"),
-    h("div", { class: "settings-field-row" }, field("Folder", logFolderInput), field("Type", logTypeInput)),
-    field("Properties", logPropertiesInput),
+    h("div", { class: "settings-field-row" }, settingsField("Folder", logFolderInput), settingsField("Type", logTypeInput)),
+    settingsField("Properties", logPropertiesInput),
     h("h3", { class: "settings-label" }, "Weekly memory"),
-    h("div", { class: "settings-field-row" }, field("Folder", memoryFolderInput), field("Type", memoryTypeInput)),
-    field("{date} is this day of the summarized week", memoryWeekdaySelect),
-    field("Properties", memoryPropertiesInput),
+    h(
+      "div",
+      { class: "settings-field-row" },
+      settingsField("Folder", memoryFolderInput),
+      settingsField("Type", memoryTypeInput)
+    ),
+    settingsField("{date} is this day of the summarized week", memoryWeekdaySelect),
+    settingsField("Properties", memoryPropertiesInput),
     h("div", { class: "settings-actions" }, removeButton, saveButton),
     status
   );
@@ -73,15 +83,7 @@ export function buildProfileVaultAccessSection({ signal } = {}) {
 
   function render(payload) {
     current = payload;
-    profileSelect.replaceChildren(
-      ...(payload.profiles || []).map((profile) =>
-        h(
-          "option",
-          { value: profile.id, selected: profile.id === payload.profile ? "selected" : null },
-          `${prettifyProfileName(profile.id)}${profile.active ? " · Active" : ""}`
-        )
-      )
-    );
+    profileSelect.replaceChildren(profileOptions(payload));
     const access = payload.access || {};
     agentInput.value = access.agent || "";
     readInput.value = (access.read || []).join("\n");
@@ -161,10 +163,6 @@ export function buildProfileVaultAccessSection({ signal } = {}) {
       return run("Loading vault access…", () => getProfileVaultAccess(current?.profile));
     },
   };
-}
-
-function field(label, control) {
-  return h("label", { class: "settings-field" }, h("span", { class: "settings-label" }, label), control);
 }
 
 function textInput(name, placeholder) {

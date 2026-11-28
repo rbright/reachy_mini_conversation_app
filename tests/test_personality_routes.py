@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 from reachy_mini.apps.jsonrpc_server import JsonRpcServer
 import reachy_mini_conversation_app.personality as personality_mod
-from reachy_mini_conversation_app.config import DEFAULT_PROFILES_DIRECTORY, config
+from reachy_mini_conversation_app.config import HF_AVAILABLE_VOICES, DEFAULT_PROFILES_DIRECTORY, config
 from reachy_mini_conversation_app.profile_store import (
     write_profile,
     read_profile_from_directory,
@@ -22,7 +22,8 @@ from reachy_mini_conversation_app.profile_toolsets import (
     write_profile_tool_override,
 )
 from reachy_mini_conversation_app.personality_routes import (
-    build_personality_ops,
+    RouteError,
+    PersonalityOps,
     register_personality_methods,
 )
 from reachy_mini_conversation_app.profile_tool_routes import register_profile_tool_methods
@@ -38,7 +39,7 @@ def _rpc_call(client: TestClient, method: str, params: dict[str, object] | None 
 def _client() -> TestClient:
     app = FastAPI()
     rpc = JsonRpcServer()
-    register_personality_methods(rpc, build_personality_ops(MagicMock(), lambda: None))
+    register_personality_methods(rpc, PersonalityOps(MagicMock(), lambda: None))
     rpc.mount(app)
     return TestClient(app)
 
@@ -254,7 +255,7 @@ def test_applying_default_persists_runtime_none(monkeypatch: pytest.MonkeyPatch)
     handler.get_current_voice.return_value = "Aiden"
     persist_personality = MagicMock()
     rpc = JsonRpcServer()
-    ops = build_personality_ops(
+    ops = PersonalityOps(
         handler,
         lambda: None,
         persist_personality=persist_personality,
@@ -274,7 +275,7 @@ def test_force_reloads_active_personality(monkeypatch: pytest.MonkeyPatch) -> No
     app = FastAPI()
     handler = MagicMock()
     handler.apply_personality = AsyncMock(return_value="Personality reloaded.")
-    ops = build_personality_ops(handler, lambda: asyncio.get_running_loop())
+    ops = PersonalityOps(handler, lambda: asyncio.get_running_loop())
     rpc = JsonRpcServer()
     register_personality_methods(rpc, ops)
     rpc.mount(app)
@@ -325,3 +326,112 @@ def test_external_tools_are_available_without_autoload(
             "description": "",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_personality_ops_return_hf_voices() -> None:
+    """With no running loop, voices() falls back to the Hugging Face catalog."""
+    ops = PersonalityOps(MagicMock(), lambda: None)
+    assert await ops.voices() == HF_AVAILABLE_VOICES
+
+
+def test_personality_ops_delete_builtin_is_not_deletable() -> None:
+    """Deleting a built-in personality raises not_deletable (was REST 404)."""
+    ops = PersonalityOps(MagicMock(), lambda: None)
+    with pytest.raises(RouteError) as ei:
+        ops.delete("mad_scientist_assistant")
+    assert ei.value.reason == "not_deletable"
+
+
+def test_personality_ops_load_builtin_default_profile() -> None:
+    """The bulk personality API should retain the complete profile payload."""
+    ops = PersonalityOps(MagicMock(), lambda: None)
+    data = ops.load("default")
+    assert "Reachy Mini" in data["instructions"]
+    assert data["tools_text"]
+    assert data["enabled_tools"]
+    assert data["available_tools"]
+
+
+@pytest.mark.asyncio
+async def test_personality_ops_apply_voice() -> None:
+    """apply_voice delegates to the handler and reports the status."""
+    handler = MagicMock()
+    handler.change_voice = AsyncMock(return_value="Voice changed to cedar.")
+    ops = PersonalityOps(handler, lambda: asyncio.get_running_loop())
+
+    result = await ops.apply_voice("cedar")
+
+    assert result == {"ok": True, "status": "Voice changed to cedar."}
+    handler.change_voice.assert_awaited_once_with("cedar")
+
+
+@pytest.mark.asyncio
+async def test_personality_ops_persist_startup_with_voice_override() -> None:
+    """Applying with persist=True saves the active manual voice override."""
+    handler = MagicMock()
+    handler.apply_personality = AsyncMock(return_value="Applied personality and restarted realtime session.")
+    handler.get_current_voice = MagicMock(return_value="shimmer")
+    persist_personality = MagicMock()
+    ops = PersonalityOps(handler, lambda: asyncio.get_running_loop(), persist_personality=persist_personality)
+
+    result = await ops.apply("sorry_bro", persist=True)
+
+    assert result["ok"] is True
+    handler.apply_personality.assert_awaited_once_with("sorry_bro")
+    persist_personality.assert_called_once_with("sorry_bro", "shimmer")
+
+
+@pytest.mark.asyncio
+async def test_personality_ops_apply_same_profile_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Re-applying the active personality is a no-op for the realtime handler."""
+    monkeypatch.setattr(config, "REACHY_MINI_CUSTOM_PROFILE", "sorry_bro")
+    handler = MagicMock()
+    handler.apply_personality = AsyncMock(return_value="should not be called")
+    handler.get_current_voice = MagicMock(return_value="shimmer")
+    ops = PersonalityOps(handler, lambda: None)
+
+    result = await ops.apply("sorry_bro")
+
+    assert result["status"] == "Personality unchanged."
+    handler.apply_personality.assert_not_awaited()
+    handler.get_current_voice.assert_not_called()
+
+
+def test_personality_ops_startup_choice_survives_runtime_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runtime profile switching should not redefine the saved startup personality."""
+    monkeypatch.setattr(config, "REACHY_MINI_CUSTOM_PROFILE", "captain_circuit")
+    ops = PersonalityOps(MagicMock(), lambda: None)
+
+    first = ops.get_choices()
+    assert first["current"] == "captain_circuit"
+    assert first["startup"] == "captain_circuit"
+
+    monkeypatch.setattr(config, "REACHY_MINI_CUSTOM_PROFILE", "chess_coach")
+
+    second = ops.get_choices()
+    assert second["current"] == "chess_coach"
+    assert second["startup"] == "captain_circuit"
+
+
+@pytest.mark.asyncio
+async def test_personality_ops_use_apply_callback() -> None:
+    """Apply delegates to the injected apply_personality callback, not the handler."""
+    handler = MagicMock()
+    handler.apply_personality = AsyncMock(return_value="handler should not be called")
+    apply_personality = AsyncMock(return_value="Applied personality and restarting backend.")
+    get_current_voice = MagicMock(return_value="cedar")
+    ops = PersonalityOps(
+        handler,
+        lambda: asyncio.get_running_loop(),
+        apply_personality=apply_personality,
+        get_current_voice=get_current_voice,
+    )
+
+    result = await ops.apply("sorry_bro")
+
+    assert result["status"] == "Applied personality and restarting backend."
+    apply_personality.assert_awaited_once_with("sorry_bro")
+    handler.apply_personality.assert_not_awaited()

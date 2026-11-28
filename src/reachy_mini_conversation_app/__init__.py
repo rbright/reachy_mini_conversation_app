@@ -1,1 +1,1 @@
-"""Nothing (for ruff)."""
+"""Reachy Mini conversation app."""

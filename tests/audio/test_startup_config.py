@@ -1,6 +1,5 @@
 """Tests for Reachy Mini audio startup configuration."""
 
-from __future__ import annotations
 from types import SimpleNamespace
 
 from reachy_mini_conversation_app.audio.startup_config import (

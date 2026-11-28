@@ -31,7 +31,7 @@ from reachy_mini_conversation_app.profile_toolsets import (
     profile_toolsets_transaction,
 )
 from reachy_mini_conversation_app.profile_vault_access import read_profile_vault_access, write_profile_vault_access
-from reachy_mini_conversation_app.tools.tool_constants import SystemTool
+from reachy_mini_conversation_app.tools.tool_constants import SYSTEM_TOOL_NAMES
 
 
 logger = logging.getLogger(__name__)
@@ -76,8 +76,7 @@ def list_personalities() -> list[str]:
 def available_tool_catalog() -> list[AvailableTool]:
     """List configurable tools and their source."""
     catalog: dict[str, AvailableTool] = {}
-    excluded_modules = {"__init__", "core_tools", "background_tool_manager", "tool_constants"}
-    excluded_modules.update(tool.value for tool in SystemTool)
+    excluded_modules = {"__init__", "core_tools", "background_tool_manager", "tool_constants"} | SYSTEM_TOOL_NAMES
     for tool_name in list_tool_module_names(Path(__file__).parent / "tools"):
         if tool_name in excluded_modules:
             continue
@@ -114,9 +113,7 @@ def delete_personality(name: str) -> bool:
     """Delete a user-created personality without touching bundled profiles."""
     target = config.resolve_profile_dir(name).resolve()
     user_root = config.user_personalities_root().resolve()
-    if user_root not in target.parents:
-        return False
-    if not target.is_dir():
+    if user_root not in target.parents or not target.is_dir():
         return False
     shutil.rmtree(target)
     try:

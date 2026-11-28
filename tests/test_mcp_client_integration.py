@@ -1,16 +1,11 @@
-from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 
 import pytest
 import uvicorn
 import pytest_asyncio
-from starlette.responses import PlainTextResponse
-
-
-pytest.importorskip("mcp.server")
-
 from mcp.server import MCPServer
+from starlette.responses import PlainTextResponse
 
 from reachy_mini_conversation_app.mcp_client import (
     RemoteToolSpec,
